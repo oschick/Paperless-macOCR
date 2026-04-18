@@ -115,6 +115,17 @@ def _verify_webhook_secret(payload_body: bytes, signature: str | None, secret: s
         raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
 
+_SUPPORTED_MIME_TYPES = {
+    "application/pdf",
+    "image/png",
+    "image/jpeg",
+    "image/tiff",
+    "image/webp",
+    "image/gif",
+    "image/bmp",
+}
+
+
 async def process_document(document_id: int) -> None:
     """Core OCR pipeline for a single document."""
     settings = state.settings
@@ -128,31 +139,41 @@ async def process_document(document_id: int) -> None:
     mime_type: str = doc_meta.get("mime_type", "")
     original_name: str = doc_meta.get("original_file_name", f"doc-{document_id}")
 
-    if mime_type != "application/pdf":
-        logger.info("Document %d is not a PDF (%s) - skipping", document_id, mime_type)
+    if mime_type not in _SUPPORTED_MIME_TYPES:
+        logger.info("Document %d has unsupported type (%s) - skipping", document_id, mime_type)
         return
 
     # 2. Download original file
-    pdf_bytes = await paperless.download_document(document_id)
-    logger.info("Downloaded document %d (%s, %d bytes)", document_id, original_name, len(pdf_bytes))
+    file_bytes = await paperless.download_document(document_id)
+    logger.info("Downloaded document %d (%s, %d bytes)", document_id, original_name, len(file_bytes))
+
+    is_pdf = mime_type == "application/pdf"
 
     # 3. Optionally skip if PDF already has text
-    if settings.skip_if_text_present and pdf_has_text(pdf_bytes):
+    if is_pdf and settings.skip_if_text_present and pdf_has_text(file_bytes):
         logger.info("Document %d already has extractable text - skipping", document_id)
         return
 
-    # 4. Convert each page to PNG and OCR via macOCR
-    num_pages = pdf_page_count(pdf_bytes)
-    logger.info("Document %d has %d page(s)", document_id, num_pages)
-
+    # 4. OCR via macOCR
     all_text: list[str] = []
-    for page_idx in range(num_pages):
-        logger.debug("Rendering page %d/%d at %d DPI", page_idx + 1, num_pages, settings.ocr_dpi)
-        png_bytes = pdf_page_to_png(pdf_bytes, page_idx, dpi=settings.ocr_dpi)
 
-        page_text = await macocr.ocr_image(png_bytes, filename=f"page_{page_idx + 1:04d}.png")
+    if is_pdf:
+        num_pages = pdf_page_count(file_bytes)
+        logger.info("Document %d has %d page(s)", document_id, num_pages)
+
+        for page_idx in range(num_pages):
+            logger.debug("Rendering page %d/%d at %d DPI", page_idx + 1, num_pages, settings.ocr_dpi)
+            png_bytes = pdf_page_to_png(file_bytes, page_idx, dpi=settings.ocr_dpi)
+
+            page_text = await macocr.ocr_image(png_bytes, filename=f"page_{page_idx + 1:04d}.png")
+            all_text.append(page_text.strip())
+            logger.debug("Page %d: %d chars extracted", page_idx + 1, len(page_text))
+    else:
+        # Image file - send directly to macOCR
+        logger.info("Document %d is an image (%s), sending directly to macOCR", document_id, mime_type)
+        ext = mime_type.split("/")[-1]
+        page_text = await macocr.ocr_image(file_bytes, filename=f"document.{ext}")
         all_text.append(page_text.strip())
-        logger.debug("Page %d: %d chars extracted", page_idx + 1, len(page_text))
 
     combined_text = "\n\n".join(t for t in all_text if t)
 

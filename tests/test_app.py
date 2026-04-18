@@ -124,16 +124,33 @@ def test_batch_trigger_empty(client):
 
 
 @pytest.mark.asyncio
-async def test_process_document_skips_non_pdf():
+async def test_process_document_skips_unsupported_type():
     from paperless_macocr.app import process_document
 
     state.paperless.get_document = AsyncMock(
-        return_value={"mime_type": "image/jpeg", "original_file_name": "photo.jpg"}
+        return_value={"mime_type": "message/rfc822", "original_file_name": "email.eml"}
     )
 
     await process_document(1)
 
     state.paperless.download_document.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_process_document_image():
+    from paperless_macocr.app import process_document
+
+    state.paperless.get_document = AsyncMock(
+        return_value={"mime_type": "image/jpeg", "original_file_name": "photo.jpg"}
+    )
+    state.paperless.download_document = AsyncMock(return_value=b"fake-image-bytes")
+    state.paperless.update_document_content = AsyncMock(return_value={})
+    state.macocr.ocr_image = AsyncMock(return_value="Text from image")
+
+    await process_document(10)
+
+    state.macocr.ocr_image.assert_called_once()
+    state.paperless.update_document_content.assert_called_once_with(10, "Text from image")
 
 
 @pytest.mark.asyncio

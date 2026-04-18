@@ -141,7 +141,7 @@ All settings are configured via environment variables (or a `.env` file):
 - **macOCR runs on macOS only** — it uses Apple's Vision Framework which requires macOS 13.0+. The Docker container runs this Python service, not macOCR itself.
 - The service is stateless. All state lives in Paperless-NGX.
 - Background tasks process OCR asynchronously so webhooks respond immediately.
-- Non-PDF documents (images, etc.) are skipped automatically.
+- Images (JPEG, PNG, TIFF, WebP, GIF, BMP) are sent directly to macOCR; unsupported types (emails, plain text, etc.) are skipped automatically.
 
 ## Running Tests
 
