@@ -34,9 +34,19 @@ class PaperlessClient:
         response.raise_for_status()
         return response.json()
 
-    async def download_document(self, document_id: int) -> bytes:
-        """Download the original document file."""
-        response = await self._client.get(f"/api/documents/{document_id}/download/")
+    async def download_document(self, document_id: int, *, original: bool = False) -> bytes:
+        """Download a document file.
+
+        Args:
+            document_id: Paperless document ID.
+            original: If True, fetch the original upload instead of the
+                      archive (Paperless-OCR'd) version.
+        """
+        params = {"original": "true"} if original else {}
+        response = await self._client.get(
+            f"/api/documents/{document_id}/download/",
+            params=params,
+        )
         response.raise_for_status()
         return response.content
 

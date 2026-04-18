@@ -159,8 +159,8 @@ async def process_document(document_id: int) -> None:
         logger.info("Document %d has unsupported type (%s) - skipping", document_id, mime_type)
         return
 
-    # 2. Download original file
-    file_bytes = await paperless.download_document(document_id)
+    # 2. Download original file (not the Paperless archive/OCR'd version)
+    file_bytes = await paperless.download_document(document_id, original=True)
     logger.info("Downloaded document %d (%s, %d bytes)", document_id, original_name, len(file_bytes))
 
     is_pdf = mime_type == "application/pdf"
