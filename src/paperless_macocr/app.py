@@ -172,7 +172,7 @@ async def process_document(document_id: int) -> None:
         # Image file - send directly to macOCR
         logger.info("Document %d is an image (%s), sending directly to macOCR", document_id, mime_type)
         ext = mime_type.split("/")[-1]
-        page_text = await macocr.ocr_image(file_bytes, filename=f"document.{ext}")
+        page_text = await macocr.ocr_image(file_bytes, filename=f"document.{ext}", content_type=mime_type)
         all_text.append(page_text.strip())
 
     combined_text = "\n\n".join(t for t in all_text if t)
