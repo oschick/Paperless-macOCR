@@ -1,7 +1,7 @@
 services:
   paperless-macocr:
     # Alternatively, use a pre-built image:
-    image: ghcr.io/oschick/paperlessmacocr:main
+    image: ghcr.io/oschick/paperless-macocr:main
     container_name: paperless-macocr
     restart: unless-stopped
     ports:
@@ -9,6 +9,7 @@ services:
     environment:
       PAPERLESS_URL: "http://paperless-ngx:8000"
       PAPERLESS_TOKEN: "${PAPERLESS_TOKEN}"
+      # OCR backend: macOCR (port 8080) or iOS-OCR-Server (port 8000)
       MACOCR_URL: "http://host.docker.internal:8080"
       MACOCR_AUTH: ""
       WEBHOOK_SECRET: ""

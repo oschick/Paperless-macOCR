@@ -1,27 +1,29 @@
 # Paperless-macOCR
 
-A webhook service that re-OCRs [Paperless-NGX](https://docs.paperless-ngx.com/) documents using [macOCR](https://github.com/riddleling/macocr) (Apple's Vision Framework) for significantly more accurate text recognition.
+A webhook service that re-OCRs [Paperless-NGX](https://docs.paperless-ngx.com/) documents using [macOCR](https://github.com/riddleling/macocr) or [iOS-OCR-Server](https://github.com/riddleling/iOS-OCR-Server) (Apple's Vision Framework) for significantly more accurate text recognition.
 
 ## How It Works
 
 ```
-┌─────────────┐   webhook    ┌──────────────────┐   HTTP upload  ┌─────────┐
-│ Paperless   │─────────────▶│ paperless-macocr │───────────────▶│ macOCR  │
-│ NGX         │              │ (this service)   │◀───────────────│ server  │
-│             │◁─────────────│                  │   OCR text     │ (macOS) │
-└─────────────┘  PATCH API   └──────────────────┘                └─────────┘
+┌─────────────┐   webhook    ┌──────────────────┐   HTTP upload  ┌──────────────┐
+│ Paperless   │─────────────▶│ paperless-macocr │───────────────▶│ macOCR       │
+│ NGX         │              │ (this service)   │◀───────────────│ or iOS-OCR   │
+│             │◁─────────────│                  │   OCR text     │ Server       │
+└─────────────┘  PATCH API   └──────────────────┘                └──────────────┘
 ```
 
 1. Paperless-NGX consumes a document and sends a **workflow webhook** to this service.
 2. The service downloads the **original** document via the Paperless-NGX API (not the archive/OCR'd version).
-3. Each page is rendered to a PNG image and sent to a **macOCR HTTP server** running on macOS.
+3. Each page is rendered to a PNG image and sent to a **macOCR** or **iOS-OCR-Server** instance.
 4. The combined OCR text replaces the document's content in Paperless-NGX.
 5. *(Optional)* When `REPLACE_PDF=true`, the service builds a **searchable PDF** with an invisible text layer from the macOCR bounding boxes, uploads it to Paperless-NGX (preserving all metadata), and deletes the old document. This makes the Paperless PDF preview and text selection use the accurate macOCR results instead of the built-in OCR.
 
 ## Prerequisites
 
 - **Paperless-NGX** (v2.x+) with API access
-- **macOCR** running in HTTP server mode on a macOS host:
+- **One of the following OCR backends:**
+
+  **Option A: macOCR** (macOS CLI/HTTP server, requires macOS 13+):
   ```bash
   # Install on macOS
   cargo install macocr
@@ -31,6 +33,54 @@ A webhook service that re-OCRs [Paperless-NGX](https://docs.paperless-ngx.com/) 
   # Or with authentication:
   macocr -s -a admin:password123 -p 8080
   ```
+
+  **Autostart macOCR on boot (launchd):**
+
+  Create `~/Library/LaunchAgents/com.macocr.server.plist`:
+  ```xml
+  <?xml version="1.0" encoding="UTF-8"?>
+  <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+  <plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.macocr.server</string>
+    <key>ProgramArguments</key>
+    <array>
+      <string>/Users/YOUR_USERNAME/.cargo/bin/macocr</string>
+      <string>-s</string>
+      <string>-p</string>
+      <string>8080</string>
+      <!-- add -a admin:password123 here to enable authentication -->
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/macocr.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/macocr.error.log</string>
+  </dict>
+  </plist>
+  ```
+
+  Then load it:
+  ```bash
+  # Replace YOUR_USERNAME with your actual macOS username
+  launchctl load ~/Library/LaunchAgents/com.macocr.server.plist
+
+  # Verify it's running
+  launchctl list | grep macocr
+  ```
+
+  **Option B: iOS-OCR-Server** (iOS app, runs on iPhone/iPad):
+  1. Install [OCR Server](https://apps.apple.com/us/app/ocr-server/id6749533041) from the App Store
+  2. Launch the app — the server starts automatically on port 8000
+  3. Note the IP address displayed in the app
+  4. Set `MACOCR_URL=http://<iphone-ip>:8000`
+
+  > Both backends expose the same `/upload` API and return identical JSON responses, so they are fully interchangeable.
 
 ## Quick Start
 
@@ -128,8 +178,8 @@ All settings are configured via environment variables (or a `.env` file):
 |----------|---------|-------------|
 | `PAPERLESS_URL` | *(required)* | Paperless-NGX base URL |
 | `PAPERLESS_TOKEN` | *(required)* | Paperless-NGX API token |
-| `MACOCR_URL` | *(required)* | macOCR HTTP server URL |
-| `MACOCR_AUTH` | `""` | macOCR basic auth (`user:pass`) |
+| `MACOCR_URL` | *(required)* | OCR server URL (macOCR or iOS-OCR-Server) |
+| `MACOCR_AUTH` | `""` | OCR server basic auth (`user:pass`, macOCR only) |
 | `HOST` | `0.0.0.0` | Listen address |
 | `PORT` | `9000` | Listen port |
 | `WEBHOOK_SECRET` | `""` | HMAC-SHA256 shared secret |
@@ -151,10 +201,11 @@ When `REPLACE_PDF=true`, the service doesn't just update the text content — it
 
 ## Architecture Notes
 
-- **macOCR runs on macOS only** — it uses Apple's Vision Framework which requires macOS 13.0+. The Docker container runs this Python service, not macOCR itself.
+- **macOCR** requires macOS 13.0+; **iOS-OCR-Server** runs on any iPhone/iPad with iOS 16+. Both use Apple's Vision Framework.
+- The Docker container runs this Python service only — the OCR backend runs separately on an Apple device.
 - The service is stateless. All state lives in Paperless-NGX.
 - Background tasks process OCR asynchronously so webhooks respond immediately.
-- Images (JPEG, PNG, TIFF, WebP, GIF, BMP) are sent directly to macOCR; unsupported types (emails, plain text, etc.) are skipped automatically.
+- Images (JPEG, PNG, TIFF, WebP, GIF, BMP) are sent directly to the OCR server; unsupported types (emails, plain text, etc.) are skipped automatically.
 
 ## Running Tests
 
