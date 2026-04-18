@@ -1,8 +1,7 @@
 services:
   paperless-macocr:
-    build: .
     # Alternatively, use a pre-built image:
-    # image: ghcr.io/OWNER/paperless-macocr:latest
+    image: ghcr.io/oschick/paperlessmacocr:main
     container_name: paperless-macocr
     restart: unless-stopped
     ports:
