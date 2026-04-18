@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     # OCR settings
     ocr_dpi: int = 300
     skip_if_text_present: bool = True
+    replace_pdf: bool = False
 
 
 def get_settings() -> Settings:

@@ -3,7 +3,14 @@
 import pymupdf
 import pytest
 
-from paperless_macocr.pdf import pdf_has_text, pdf_page_count, pdf_page_to_png
+from paperless_macocr.ocr import OcrPageData
+from paperless_macocr.pdf import (
+    image_to_searchable_pdf,
+    pdf_embed_text_layer,
+    pdf_has_text,
+    pdf_page_count,
+    pdf_page_to_png,
+)
 
 
 @pytest.fixture
@@ -66,3 +73,85 @@ def test_pdf_page_to_png_high_dpi(blank_pdf):
     png_high = pdf_page_to_png(blank_pdf, 0, dpi=300)
     # Higher DPI should produce a larger image
     assert len(png_high) > len(png_low)
+
+
+# ---- pdf_embed_text_layer tests ----
+
+
+def test_pdf_embed_text_layer_adds_searchable_text(blank_pdf):
+    """Embedding OCR boxes should produce a PDF with extractable text."""
+    page_data = [
+        OcrPageData(
+            text="Hello World",
+            boxes=[
+                {"text": "Hello", "x": 10, "y": 20, "w": 50, "h": 14},
+                {"text": "World", "x": 70, "y": 20, "w": 50, "h": 14},
+            ],
+            image_width=200.0,
+            image_height=200.0,
+        )
+    ]
+    result = pdf_embed_text_layer(blank_pdf, page_data)
+    assert pdf_has_text(result)
+    with pymupdf.open(stream=result, filetype="pdf") as doc:
+        text = doc[0].get_text()
+        assert "Hello" in text
+        assert "World" in text
+
+
+def test_pdf_embed_text_layer_no_boxes(blank_pdf):
+    """Empty boxes should return a valid PDF without adding text."""
+    page_data = [OcrPageData(text="", boxes=[], image_width=200, image_height=200)]
+    result = pdf_embed_text_layer(blank_pdf, page_data)
+    assert not pdf_has_text(result)
+
+
+def test_pdf_embed_text_layer_multi_page(multi_page_pdf):
+    """Should handle multi-page PDFs."""
+    page_data = [
+        OcrPageData(
+            text="Page 1",
+            boxes=[{"text": "Page 1", "x": 10, "y": 20, "w": 60, "h": 14}],
+            image_width=200.0,
+            image_height=200.0,
+        ),
+        OcrPageData(text="", boxes=[], image_width=200, image_height=200),
+        OcrPageData(
+            text="Page 3",
+            boxes=[{"text": "Page 3", "x": 10, "y": 20, "w": 60, "h": 14}],
+            image_width=200.0,
+            image_height=200.0,
+        ),
+    ]
+    result = pdf_embed_text_layer(multi_page_pdf, page_data)
+    with pymupdf.open(stream=result, filetype="pdf") as doc:
+        assert "Page 1" in doc[0].get_text()
+        assert doc[1].get_text().strip() == ""
+        assert "Page 3" in doc[2].get_text()
+
+
+# ---- image_to_searchable_pdf tests ----
+
+
+def test_image_to_searchable_pdf():
+    """Should produce a searchable PDF from a PNG image."""
+    # Create a small PNG via pymupdf
+    doc = pymupdf.open()
+    page = doc.new_page(width=100, height=100)
+    page.draw_rect(pymupdf.Rect(10, 10, 90, 90), color=(0, 0, 0))
+    pix = page.get_pixmap()
+    png_bytes = pix.tobytes(output="png")
+    doc.close()
+
+    ocr_data = OcrPageData(
+        text="Test",
+        boxes=[{"text": "Test", "x": 10, "y": 10, "w": 40, "h": 12}],
+        image_width=100.0,
+        image_height=100.0,
+    )
+    result = image_to_searchable_pdf(png_bytes, ocr_data, image_format="png")
+
+    # Should be a valid PDF
+    assert result[:5] == b"%PDF-"
+    with pymupdf.open(stream=result, filetype="pdf") as doc:
+        assert "Test" in doc[0].get_text()

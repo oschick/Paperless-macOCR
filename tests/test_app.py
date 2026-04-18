@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from paperless_macocr.app import app, state
 from paperless_macocr.config import Settings
+from paperless_macocr.ocr import OcrPageData
 
 
 @pytest.fixture(autouse=True)
@@ -145,7 +146,7 @@ async def test_process_document_image():
     )
     state.paperless.download_document = AsyncMock(return_value=b"fake-image-bytes")
     state.paperless.update_document_content = AsyncMock(return_value={})
-    state.macocr.ocr_image = AsyncMock(return_value="Text from image")
+    state.macocr.ocr_image = AsyncMock(return_value=OcrPageData(text="Text from image"))
 
     await process_document(10)
 
@@ -169,9 +170,64 @@ async def test_process_document_full_pipeline():
     )
     state.paperless.download_document = AsyncMock(return_value=pdf_bytes)
     state.paperless.update_document_content = AsyncMock(return_value={})
-    state.macocr.ocr_image = AsyncMock(return_value="Hello World")
+    state.macocr.ocr_image = AsyncMock(return_value=OcrPageData(text="Hello World"))
 
     await process_document(42)
 
     state.macocr.ocr_image.assert_called_once()
     state.paperless.update_document_content.assert_called_once_with(42, "Hello World")
+
+
+@pytest.mark.asyncio
+async def test_process_document_replace_pdf():
+    """When replace_pdf is enabled, uploads a searchable PDF and deletes the old one."""
+    import pymupdf
+
+    from paperless_macocr.app import process_document
+
+    doc = pymupdf.open()
+    doc.new_page(width=200, height=200)
+    pdf_bytes = doc.tobytes()
+    doc.close()
+
+    state.settings.replace_pdf = True
+
+    state.paperless.get_document = AsyncMock(
+        return_value={
+            "mime_type": "application/pdf",
+            "original_file_name": "test.pdf",
+            "title": "Test Doc",
+            "correspondent": 1,
+            "document_type": 2,
+            "storage_path": None,
+            "tags": [3, 4],
+            "archive_serial_number": None,
+        }
+    )
+    state.paperless.download_document = AsyncMock(return_value=pdf_bytes)
+    state.paperless.update_document_content = AsyncMock(return_value={})
+    state.paperless.upload_document = AsyncMock(return_value="task-uuid-123")
+    state.paperless.get_task = AsyncMock(return_value={"status": "SUCCESS", "related_document": 99})
+    state.paperless.delete_document = AsyncMock()
+
+    ocr_result = OcrPageData(
+        text="OCR text",
+        boxes=[{"text": "OCR text", "x": 10, "y": 10, "w": 80, "h": 14}],
+        image_width=200.0,
+        image_height=200.0,
+    )
+    state.macocr.ocr_image = AsyncMock(return_value=ocr_result)
+
+    await process_document(42)
+
+    # Should have uploaded a searchable PDF
+    state.paperless.upload_document.assert_called_once()
+    upload_kwargs = state.paperless.upload_document.call_args
+    assert upload_kwargs.kwargs["title"] == "Test Doc"
+
+    # Should update content on the NEW document
+    calls = state.paperless.update_document_content.call_args_list
+    assert any(c.args == (99, "OCR text") for c in calls)
+
+    # Should delete the old document
+    state.paperless.delete_document.assert_called_once_with(42)

@@ -1,6 +1,7 @@
 """macOCR HTTP server client."""
 
 import logging
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -8,6 +9,17 @@ import httpx
 from paperless_macocr.config import Settings
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class OcrPageData:
+    """OCR result for a single page/image."""
+
+    text: str
+    boxes: list[dict[str, Any]] = field(default_factory=list)
+    image_width: float = 0.0
+    image_height: float = 0.0
+
 
 # Horizontal gap (in average char widths) that splits boxes into clusters.
 _CLUSTER_GAP_CHARS = 4
@@ -107,6 +119,9 @@ def _reconstruct_text(data: dict[str, Any]) -> str:
     boxes = [b for b in boxes if b.get("text", "").strip()]
     if not boxes:
         return ""
+
+    # Work on copies so the caller's data is not mutated
+    boxes = [dict(b) for b in boxes]
 
     # Strip left margin so text starts at column 0
     min_x = min(b["x"] for b in boxes)
@@ -242,4 +257,9 @@ class MacOCRClient:
             msg = data.get("message", "Unknown macOCR error")
             raise RuntimeError(f"macOCR returned failure: {msg}")
 
-        return _reconstruct_text(data)
+        return OcrPageData(
+            text=_reconstruct_text(data),
+            boxes=data.get("ocr_boxes", []),
+            image_width=data.get("image_width", 0),
+            image_height=data.get("image_height", 0),
+        )
