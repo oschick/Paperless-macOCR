@@ -102,6 +102,17 @@ def _overlay_boxes(
         )
 
 
+def _ensure_text(page: Any) -> None:
+    """Insert a tiny invisible space so Paperless sees the page as already OCR'd."""
+    page.insert_text(
+        pymupdf.Point(0, 0),
+        " ",
+        fontsize=1,
+        fontname="helv",
+        render_mode=3,
+    )
+
+
 def pdf_embed_text_layer(
     pdf_bytes: bytes,
     page_data: list[OcrPageData],
@@ -112,15 +123,20 @@ def pdf_embed_text_layer(
     scaled from image-pixel space to PDF-point space and inserted as
     invisible (render-mode 3) text so that PDF viewers can search /
     copy the text.
+
+    Pages without detected text get a minimal invisible marker so that
+    Paperless-NGX treats them as already OCR'd (``skip_if_text_present``).
     """
     with pymupdf.open(stream=pdf_bytes, filetype="pdf") as doc:
         for page_idx, page in enumerate(doc):
             if page_idx >= len(page_data):
-                break
-            ocr = page_data[page_idx]
-            if not ocr.boxes:
+                _ensure_text(page)
                 continue
-            _overlay_boxes(page, ocr.boxes, ocr.image_width, ocr.image_height)
+            ocr = page_data[page_idx]
+            if ocr.boxes:
+                _overlay_boxes(page, ocr.boxes, ocr.image_width, ocr.image_height)
+            else:
+                _ensure_text(page)
         return doc.tobytes()
 
 
