@@ -13,9 +13,10 @@ A webhook service that re-OCRs [Paperless-NGX](https://docs.paperless-ngx.com/) 
 ```
 
 1. Paperless-NGX consumes a document and sends a **workflow webhook** to this service.
-2. The service downloads the PDF via the Paperless-NGX API.
+2. The service downloads the **original** document via the Paperless-NGX API (not the archive/OCR'd version).
 3. Each page is rendered to a PNG image and sent to a **macOCR HTTP server** running on macOS.
 4. The combined OCR text replaces the document's content in Paperless-NGX.
+5. *(Optional)* When `REPLACE_PDF=true`, the service builds a **searchable PDF** with an invisible text layer from the macOCR bounding boxes, uploads it to Paperless-NGX (preserving all metadata), and deletes the old document. This makes the Paperless PDF preview and text selection use the accurate macOCR results instead of the built-in OCR.
 
 ## Prerequisites
 
@@ -135,6 +136,18 @@ All settings are configured via environment variables (or a `.env` file):
 | `LOG_LEVEL` | `INFO` | Logging level |
 | `OCR_DPI` | `300` | PDF-to-image rendering DPI |
 | `SKIP_IF_TEXT_PRESENT` | `true` | Skip PDFs that already have text |
+| `REPLACE_PDF` | `false` | Upload a searchable PDF back to Paperless (see below) |
+
+## Searchable PDF Replacement
+
+When `REPLACE_PDF=true`, the service doesn't just update the text content — it also builds a new PDF with an **invisible text layer** positioned using the bounding boxes returned by macOCR. This searchable PDF is uploaded to Paperless-NGX as a new document (with all metadata copied), and the original document is deleted.
+
+**Why?** By default, Paperless-NGX's PDF preview uses its own OCR results for text selection and search highlighting. Replacing the document with a searchable PDF ensures the preview, text selection, and copy-paste all use the more accurate macOCR results.
+
+**Requirements:**
+
+- Set `PAPERLESS_OCR_MODE=skip` in your Paperless-NGX configuration so the re-uploaded PDF is not re-OCR'd by Paperless's built-in engine.
+- The service automatically prevents infinite webhook loops — it tracks documents it just uploaded and skips them when the webhook fires for the newly consumed document.
 
 ## Architecture Notes
 

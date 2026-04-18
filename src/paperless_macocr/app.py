@@ -23,8 +23,11 @@ from paperless_macocr.pdf import (
 
 logger = logging.getLogger(__name__)
 
-# Document IDs recently uploaded by us (to prevent webhook loops).
-_recently_replaced: set[int] = set()
+# Titles of documents currently being replaced with searchable PDFs.
+# Checked by process_document() to break webhook loops.  The title is
+# added *before* uploading so it is already in the set when the
+# webhook for the new document fires.
+_replacing_titles: set[str] = set()
 
 
 # ---------------------------------------------------------------------------
@@ -142,18 +145,20 @@ async def process_document(document_id: int) -> None:
     paperless = state.paperless
     macocr = state.macocr
 
-    # Guard: skip documents we just uploaded to avoid infinite loops
-    if document_id in _recently_replaced:
-        _recently_replaced.discard(document_id)
-        logger.info("Document %d was just replaced by us - skipping", document_id)
-        return
-
     logger.info("Processing document %d", document_id)
 
     # 1. Fetch metadata
     doc_meta = await paperless.get_document(document_id)
     mime_type: str = doc_meta.get("mime_type", "")
     original_name: str = doc_meta.get("original_file_name", f"doc-{document_id}")
+    title: str = doc_meta.get("title", "")
+
+    # Guard: skip documents we are currently replacing to avoid infinite loops.
+    # _replacing_titles is populated before the upload, so it is always set
+    # by the time the webhook for the newly consumed document arrives.
+    if title and title in _replacing_titles:
+        logger.info("Document %d (%s) is being replaced by us - skipping", document_id, title)
+        return
 
     if mime_type not in _SUPPORTED_MIME_TYPES:
         logger.info("Document %d has unsupported type (%s) - skipping", document_id, mime_type)
@@ -223,6 +228,7 @@ async def _replace_with_searchable_pdf(
 ) -> None:
     """Build a searchable PDF and upload it to Paperless, replacing the original."""
     paperless = state.paperless
+    title = doc_meta.get("title", f"doc-{document_id}")
 
     # Build searchable PDF
     if is_pdf:
@@ -233,55 +239,56 @@ async def _replace_with_searchable_pdf(
 
     logger.info("Built searchable PDF for document %d (%d bytes)", document_id, len(searchable_pdf))
 
-    # Upload to Paperless
-    title = doc_meta.get("title", f"doc-{document_id}")
-    task_uuid = await paperless.upload_document(
-        searchable_pdf,
-        f"{title}.pdf",
-        title=title,
-        correspondent=doc_meta.get("correspondent"),
-        document_type=doc_meta.get("document_type"),
-        storage_path=doc_meta.get("storage_path"),
-        tags=doc_meta.get("tags"),
-        archive_serial_number=doc_meta.get("archive_serial_number"),
-    )
+    # Mark this title as in-flight BEFORE uploading so the webhook for
+    # the newly consumed document will be skipped by process_document().
+    _replacing_titles.add(title)
+    try:
+        task_uuid = await paperless.upload_document(
+            searchable_pdf,
+            f"{title}.pdf",
+            title=title,
+            correspondent=doc_meta.get("correspondent"),
+            document_type=doc_meta.get("document_type"),
+            storage_path=doc_meta.get("storage_path"),
+            tags=doc_meta.get("tags"),
+            archive_serial_number=doc_meta.get("archive_serial_number"),
+        )
 
-    # Wait for consumption to complete
-    new_doc_id = None
-    for _ in range(_TASK_POLL_MAX):
-        await asyncio.sleep(_TASK_POLL_INTERVAL)
-        task = await paperless.get_task(task_uuid)
-        status = task.get("status", "")
-        if status == "SUCCESS":
-            new_doc_id = task.get("related_document")
-            break
-        if status == "FAILURE":
-            logger.error(
-                "Consumption failed for document %d: %s",
-                document_id,
-                task.get("result", "unknown error"),
-            )
+        # Wait for consumption to complete
+        new_doc_id = None
+        for _ in range(_TASK_POLL_MAX):
+            await asyncio.sleep(_TASK_POLL_INTERVAL)
+            task = await paperless.get_task(task_uuid)
+            status = task.get("status", "")
+            if status == "SUCCESS":
+                new_doc_id = task.get("related_document")
+                break
+            if status == "FAILURE":
+                logger.error(
+                    "Consumption failed for document %d: %s",
+                    document_id,
+                    task.get("result", "unknown error"),
+                )
+                return
+
+        if new_doc_id is None:
+            logger.error("Consumption timed out for document %d (task %s)", document_id, task_uuid)
             return
 
-    if new_doc_id is None:
-        logger.error("Consumption timed out for document %d (task %s)", document_id, task_uuid)
-        return
+        new_doc_id = int(new_doc_id)
 
-    new_doc_id = int(new_doc_id)
+        # Set OCR content on the new document
+        await paperless.update_document_content(new_doc_id, combined_text)
 
-    # Remember this ID so the webhook triggered by consumption is skipped
-    _recently_replaced.add(new_doc_id)
-
-    # Set OCR content on the new document
-    await paperless.update_document_content(new_doc_id, combined_text)
-
-    # Delete the original document
-    await paperless.delete_document(document_id)
-    logger.info(
-        "Replaced document %d with searchable PDF (new id: %d)",
-        document_id,
-        new_doc_id,
-    )
+        # Delete the original document
+        await paperless.delete_document(document_id)
+        logger.info(
+            "Replaced document %d with searchable PDF (new id: %d)",
+            document_id,
+            new_doc_id,
+        )
+    finally:
+        _replacing_titles.discard(title)
 
 
 # ---------------------------------------------------------------------------
