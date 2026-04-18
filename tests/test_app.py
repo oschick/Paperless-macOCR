@@ -57,6 +57,23 @@ def test_webhook_missing_id(client):
     assert resp.status_code == 422
 
 
+def test_webhook_with_doc_url(client):
+    resp = client.post("/webhook", json={"doc_url": "http://paperless:8000/documents/55/"})
+    assert resp.status_code == 200
+    assert "55" in resp.json()["message"]
+
+
+def test_webhook_with_doc_url_no_trailing_slash(client):
+    resp = client.post("/webhook", json={"doc_url": "http://paperless:8000/documents/123"})
+    assert resp.status_code == 200
+    assert "123" in resp.json()["message"]
+
+
+def test_webhook_with_invalid_doc_url(client):
+    resp = client.post("/webhook", json={"doc_url": "http://paperless:8000/other/path"})
+    assert resp.status_code == 422
+
+
 def test_webhook_secret_verification(client):
     state.settings.webhook_secret = "my-secret"
     payload = b'{"document_id": 1}'

@@ -84,14 +84,23 @@ paperless-macocr
 
 ## Paperless-NGX Webhook Configuration
 
-1. Go to **Paperless-NGX → Settings → Workflows**
+1. Go to **Paperless-NGX → Manage → Workflows** (in the sidebar)
 2. Create a new workflow:
    - **Trigger**: Document Added (consumption finished)
    - **Action**: Webhook
    - **URL**: `http://paperless-macocr:9000/webhook`
-   - **Body** (JSON): `{"document_id": {doc_id}}`
+   - **Encoding**: JSON
+   - **Body** (use key-value params):
+     | Key | Value |
+     |-----|-------|
+     | `doc_url` | `{{doc_url}}` |
 
-> If using `WEBHOOK_SECRET`, Paperless-NGX should send an `X-Webhook-Signature` header with an HMAC-SHA256 hex digest of the request body.
+   > **Note:** Paperless-NGX does not expose a document ID placeholder directly.
+   > The service extracts the ID from the `{{doc_url}}` placeholder
+   > (e.g. `http://paperless:8000/documents/42/`).
+   > Make sure `PAPERLESS_URL` is set in your Paperless-NGX configuration.
+
+> If using `WEBHOOK_SECRET`, configure an `X-Webhook-Signature` header with an HMAC-SHA256 hex digest of the request body.
 
 ## API Endpoints
 

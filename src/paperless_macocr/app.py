@@ -3,6 +3,7 @@
 import hashlib
 import hmac
 import logging
+import re
 from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
@@ -60,18 +61,29 @@ class WebhookPayload(BaseModel):
 
     Paperless-NGX sends different payload shapes depending on the
     workflow trigger.  We only require the document ID.
+
+    Supports:
+      - Direct ID fields: document_id, id, doc
+      - doc_url: Paperless-NGX document URL like
+        http://paperless:8000/documents/42/ from which the ID is extracted.
     """
 
     document_id: int | None = None
     # Alternative field names used by different Paperless versions / configs
     id: int | None = None
     doc: int | None = None
+    # Paperless-NGX workflow {{doc_url}} placeholder
+    doc_url: str | None = None
 
     def resolve_document_id(self) -> int:
         """Return the document ID from whichever field is populated."""
         for candidate in (self.document_id, self.id, self.doc):
             if candidate is not None:
                 return candidate
+        if self.doc_url:
+            match = re.search(r"/documents/(\d+)", self.doc_url)
+            if match:
+                return int(match.group(1))
         raise ValueError("No document ID found in payload")
 
 
