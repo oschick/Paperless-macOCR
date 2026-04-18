@@ -106,11 +106,7 @@ def _reconstruct_text(data: dict[str, Any]) -> str:
     if gaps:
         sorted_gaps = sorted(gaps)
         median_gap = sorted_gaps[(len(sorted_gaps) - 1) // 2]
-        paragraph_threshold = (
-            max(median_gap * 1.8, line_heights[0] * 0.5)
-            if median_gap > 0
-            else line_heights[0] * 0.5
-        )
+        paragraph_threshold = max(median_gap * 1.8, line_heights[0] * 0.5) if median_gap > 0 else line_heights[0] * 0.5
 
     # Build the final text
     result_parts: list[str] = []
