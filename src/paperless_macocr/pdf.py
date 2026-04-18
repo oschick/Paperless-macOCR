@@ -59,7 +59,9 @@ def _overlay_boxes(
 ) -> None:
     """Insert invisible text onto *page* from OCR bounding boxes.
 
-    Coordinates are converted from image-pixel space to PDF-point space.
+    The font size is computed so that the rendered text width exactly
+    matches the bounding box width.  Text is placed at the baseline
+    using ``insert_text`` to avoid line-height padding issues.
     """
     if not boxes or image_width <= 0 or image_height <= 0:
         return
@@ -67,16 +69,32 @@ def _overlay_boxes(
     scale_x = page.rect.width / image_width
     scale_y = page.rect.height / image_height
 
+    # Pre-load the font so we can measure text widths
+    font = pymupdf.Font("helv")
+
     for box in boxes:
         text = box.get("text", "").strip()
         if not text:
             continue
         x = box["x"] * scale_x
         y = box["y"] * scale_y
+        w = box["w"] * scale_x
         h = box["h"] * scale_y
-        fontsize = max(h * 0.85, 4)
+        if w <= 0 or h <= 0:
+            continue
+
+        # Compute the font size that makes the text exactly as wide
+        # as the bounding box.  Also cap at box height so it doesn't
+        # bleed vertically.
+        unit_width = font.text_length(text, fontsize=1)
+        fontsize = min(w / unit_width, h) if unit_width > 0 else h
+        fontsize = max(fontsize, 1.0)
+
+        # Baseline is at the bottom of the box minus a small descender
+        # allowance (~20% of fontsize).
+        baseline_y = y + h - fontsize * 0.2
         page.insert_text(
-            pymupdf.Point(x, y + fontsize),
+            pymupdf.Point(x, baseline_y),
             text,
             fontsize=fontsize,
             fontname="helv",
