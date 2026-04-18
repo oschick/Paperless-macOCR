@@ -1,0 +1,27 @@
+services:
+  paperless-macocr:
+    build: .
+    # Alternatively, use a pre-built image:
+    # image: ghcr.io/OWNER/paperless-macocr:latest
+    container_name: paperless-macocr
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+    environment:
+      PAPERLESS_URL: "http://paperless-ngx:8000"
+      PAPERLESS_TOKEN: "${PAPERLESS_TOKEN}"
+      MACOCR_URL: "http://host.docker.internal:8080"
+      MACOCR_AUTH: ""
+      WEBHOOK_SECRET: ""
+      LOG_LEVEL: "INFO"
+      OCR_DPI: "300"
+      SKIP_IF_TEXT_PRESENT: "true"
+    # If Paperless-NGX is running in Docker on the same network:
+    # networks:
+    #   - paperless
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+# networks:
+#   paperless:
+#     external: true
