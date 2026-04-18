@@ -23,6 +23,9 @@ from paperless_macocr.pdf import (
 
 logger = logging.getLogger(__name__)
 
+# Document IDs recently uploaded by us (to prevent webhook loops).
+_recently_replaced: set[int] = set()
+
 
 # ---------------------------------------------------------------------------
 # Shared state populated during lifespan
@@ -138,6 +141,12 @@ async def process_document(document_id: int) -> None:
     settings = state.settings
     paperless = state.paperless
     macocr = state.macocr
+
+    # Guard: skip documents we just uploaded to avoid infinite loops
+    if document_id in _recently_replaced:
+        _recently_replaced.discard(document_id)
+        logger.info("Document %d was just replaced by us - skipping", document_id)
+        return
 
     logger.info("Processing document %d", document_id)
 
@@ -258,13 +267,18 @@ async def _replace_with_searchable_pdf(
         logger.error("Consumption timed out for document %d (task %s)", document_id, task_uuid)
         return
 
+    new_doc_id = int(new_doc_id)
+
+    # Remember this ID so the webhook triggered by consumption is skipped
+    _recently_replaced.add(new_doc_id)
+
     # Set OCR content on the new document
     await paperless.update_document_content(new_doc_id, combined_text)
 
     # Delete the original document
     await paperless.delete_document(document_id)
     logger.info(
-        "Replaced document %d with searchable PDF (new id: %s)",
+        "Replaced document %d with searchable PDF (new id: %d)",
         document_id,
         new_doc_id,
     )
