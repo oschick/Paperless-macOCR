@@ -1,6 +1,12 @@
 """Tests for OCR text reconstruction from bounding boxes."""
 
-from paperless_macocr.ocr import _avg_char_width, _join_line, _reconstruct_text
+from paperless_macocr.ocr import (
+    _avg_char_width,
+    _cluster_text,
+    _format_table,
+    _reconstruct_text,
+    _split_into_clusters,
+)
 
 
 class TestAvgCharWidth:
@@ -22,37 +28,72 @@ class TestAvgCharWidth:
         assert _avg_char_width(boxes) == 10.0
 
 
-class TestJoinLine:
-    def test_adjacent_boxes(self):
-        """Boxes close together get single space separation."""
+class TestClusterText:
+    def test_basic(self):
         boxes = [
-            {"text": "Hello", "x": 0, "w": 50, "y": 0, "h": 10},
-            {"text": "World", "x": 60, "w": 50, "y": 0, "h": 10},
+            {"text": "Hello", "x": 0, "y": 0, "w": 50, "h": 10},
+            {"text": "World", "x": 60, "y": 0, "w": 50, "h": 10},
         ]
-        result = _join_line(boxes, char_w=10.0)
-        assert result == "Hello World"
+        assert _cluster_text(boxes) == "Hello World"
 
-    def test_large_gap_preserved(self):
-        """Boxes far apart get proportional spacing (letter layout)."""
+    def test_skips_empty(self):
         boxes = [
-            {"text": "John Doe", "x": 0, "w": 80, "y": 0, "h": 10},
-            {"text": "April 18, 2026", "x": 500, "w": 140, "y": 0, "h": 10},
+            {"text": "Hi", "x": 0, "y": 0, "w": 20, "h": 10},
+            {"text": "  ", "x": 30, "y": 0, "w": 10, "h": 10},
         ]
-        result = _join_line(boxes, char_w=10.0)
-        # "John Doe" at col 0, "April 18, 2026" at col 50
-        assert "John Doe" in result
-        assert "April 18, 2026" in result
-        # There should be significant spacing in between
-        gap = result.index("April") - len("John Doe")
-        assert gap > 10
+        assert _cluster_text(boxes) == "Hi"
 
-    def test_zero_char_width_fallback(self):
+
+class TestSplitIntoClusters:
+    def test_no_split_when_close(self):
+        boxes = [
+            {"text": "A", "x": 0, "w": 10, "y": 0, "h": 10},
+            {"text": "B", "x": 15, "w": 10, "y": 0, "h": 10},
+        ]
+        clusters = _split_into_clusters(boxes, char_w=10.0)
+        assert len(clusters) == 1
+
+    def test_splits_on_large_gap(self):
+        boxes = [
+            {"text": "Left", "x": 0, "w": 40, "y": 0, "h": 10},
+            {"text": "Right", "x": 200, "w": 50, "y": 0, "h": 10},
+        ]
+        # gap = 160px, threshold = 4 * 10 = 40px -> split
+        clusters = _split_into_clusters(boxes, char_w=10.0)
+        assert len(clusters) == 2
+        assert clusters[0][0]["text"] == "Left"
+        assert clusters[1][0]["text"] == "Right"
+
+    def test_empty_input(self):
+        assert _split_into_clusters([], char_w=10.0) == []
+
+    def test_zero_char_width(self):
         boxes = [
             {"text": "A", "x": 0, "w": 10, "y": 0, "h": 10},
             {"text": "B", "x": 500, "w": 10, "y": 0, "h": 10},
         ]
-        result = _join_line(boxes, char_w=0)
-        assert result == "A B"
+        clusters = _split_into_clusters(boxes, char_w=0)
+        assert len(clusters) == 1  # no splitting possible
+
+
+class TestFormatTable:
+    def test_basic(self):
+        rows = [["Name", "Qty", "Price"], ["Widget", "10", "$5.00"]]
+        result = _format_table(rows)
+        assert len(result) == 2
+        # Columns should be aligned
+        assert result[0].index("Qty") == result[1].index("10")
+        assert result[0].index("Price") == result[1].index("$5.00")
+
+    def test_uneven_rows(self):
+        rows = [["A", "B", "C"], ["X", "Y"]]
+        result = _format_table(rows)
+        assert len(result) == 2
+        # Short row padded with empty string
+        assert "C" in result[0]
+
+    def test_empty(self):
+        assert _format_table([]) == []
 
 
 class TestReconstructText:
@@ -71,9 +112,7 @@ class TestReconstructText:
                 {"text": "World", "x": 60, "y": 0, "w": 50, "h": 12},
             ],
         }
-        result = _reconstruct_text(data)
-        assert "Hello" in result
-        assert "World" in result
+        assert _reconstruct_text(data) == "Hello World"
 
     def test_two_lines(self):
         data = {
@@ -86,6 +125,19 @@ class TestReconstructText:
         assert any("Line1" in part for part in lines)
         assert any("Line2" in part for part in lines)
 
+    def test_left_margin_stripped(self):
+        """Large left margin should not produce leading spaces."""
+        data = {
+            "ocr_boxes": [
+                {"text": "Hello", "x": 200, "y": 0, "w": 50, "h": 12},
+                {"text": "World", "x": 200, "y": 20, "w": 50, "h": 12},
+            ],
+        }
+        result = _reconstruct_text(data)
+        for line in result.split("\n"):
+            if line:  # skip blank paragraph breaks
+                assert not line.startswith(" "), f"Unexpected leading spaces: {line!r}"
+
     def test_paragraph_break(self):
         """Large vertical gap produces a blank line (paragraph break)."""
         data = {
@@ -96,11 +148,10 @@ class TestReconstructText:
             ],
         }
         result = _reconstruct_text(data)
-        # There should be a blank line between paragraphs
         assert "\n\n" in result
 
-    def test_letter_layout(self):
-        """Address on the left, date on the right -- same line."""
+    def test_letter_layout_columns_stacked(self):
+        """Address left and date right are emitted as stacked blocks."""
         data = {
             "ocr_boxes": [
                 # Left: sender address
@@ -113,17 +164,41 @@ class TestReconstructText:
             ],
         }
         result = _reconstruct_text(data)
-        lines = result.strip().split("\n")
-        # Both items should be on the same line with spacing
-        line1 = lines[0]
-        assert "John Doe" in line1
-        assert "April 18, 2026" in line1
-        gap1 = line1.index("April") - line1.index("John Doe") - len("John Doe")
-        assert gap1 > 5, "Expected significant spacing between left and right blocks"
+        lines = [ln for ln in result.split("\n") if ln.strip()]
+        # Left block should come first (top), right block after
+        texts = [ln.strip() for ln in lines]
+        assert "John Doe" in texts
+        assert "123 Main St" in texts
+        assert "April 18, 2026" in texts
+        assert "Ref: 42" in texts
+        # Left column lines appear before right column lines
+        john_idx = next(i for i, t in enumerate(texts) if "John Doe" in t)
+        main_idx = next(i for i, t in enumerate(texts) if "123 Main St" in t)
+        april_idx = next(i for i, t in enumerate(texts) if "April 18, 2026" in t)
+        ref_idx = next(i for i, t in enumerate(texts) if "Ref: 42" in t)
+        assert john_idx < april_idx
+        assert main_idx < april_idx
+        assert april_idx < ref_idx or ref_idx > main_idx
 
-        line2 = lines[1]
-        assert "123 Main St" in line2
-        assert "Ref: 42" in line2
+    def test_table_aligned_columns(self):
+        """Table cells should be padded to consistent column widths."""
+        # char_w ~ 10, gaps ~90-130px = 9-13 char widths -> table (< 15)
+        data = {
+            "ocr_boxes": [
+                {"text": "Name", "x": 0, "y": 0, "w": 40, "h": 12},
+                {"text": "Qty", "x": 150, "y": 0, "w": 30, "h": 12},
+                {"text": "Price", "x": 300, "y": 0, "w": 50, "h": 12},
+                {"text": "Widget", "x": 0, "y": 20, "w": 60, "h": 12},
+                {"text": "10", "x": 150, "y": 20, "w": 20, "h": 12},
+                {"text": "$5.00", "x": 300, "y": 20, "w": 50, "h": 12},
+            ],
+        }
+        result = _reconstruct_text(data)
+        lines = result.strip().split("\n")
+        assert len(lines) == 2
+        # "Qty" and "10" should start at the same column
+        assert lines[0].index("Qty") == lines[1].index("10")
+        assert lines[0].index("Price") == lines[1].index("$5.00")
 
     def test_only_whitespace_boxes_ignored(self):
         data = {
