@@ -50,3 +50,55 @@ class PaperlessClient:
         result: dict[str, Any] = response.json()
         logger.info("Updated content for document %d (%d chars)", document_id, len(content))
         return result
+
+    async def upload_document(
+        self,
+        file_bytes: bytes,
+        filename: str,
+        *,
+        title: str | None = None,
+        correspondent: int | None = None,
+        document_type: int | None = None,
+        storage_path: int | None = None,
+        tags: list[int] | None = None,
+        archive_serial_number: int | None = None,
+    ) -> str:
+        """Upload a document for consumption. Returns the task UUID."""
+        data: dict[str, Any] = {}
+        if title is not None:
+            data["title"] = title
+        if correspondent is not None:
+            data["correspondent"] = str(correspondent)
+        if document_type is not None:
+            data["document_type"] = str(document_type)
+        if storage_path is not None:
+            data["storage_path"] = str(storage_path)
+        if archive_serial_number is not None:
+            data["archive_serial_number"] = str(archive_serial_number)
+        if tags:
+            data["tags"] = [str(t) for t in tags]
+
+        response = await self._client.post(
+            "/api/documents/post_document/",
+            files={"document": (filename, file_bytes, "application/pdf")},
+            data=data,
+        )
+        response.raise_for_status()
+        task_id: str = response.text.strip().strip('"')
+        logger.info("Uploaded %s, task %s", filename, task_id)
+        return task_id
+
+    async def get_task(self, task_id: str) -> dict[str, Any]:
+        """Return the task status for a consumption task."""
+        response = await self._client.get(f"/api/tasks/?task_id={task_id}")
+        response.raise_for_status()
+        results = response.json()
+        if results:
+            return results[0]
+        return {}
+
+    async def delete_document(self, document_id: int) -> None:
+        """Delete a document by ID."""
+        response = await self._client.delete(f"/api/documents/{document_id}/")
+        response.raise_for_status()
+        logger.info("Deleted document %d", document_id)

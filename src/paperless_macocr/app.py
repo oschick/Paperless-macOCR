@@ -1,5 +1,6 @@
 """FastAPI application - webhook receiver and OCR orchestration."""
 
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -10,9 +11,15 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from paperless_macocr.config import Settings, get_settings
-from paperless_macocr.ocr import MacOCRClient
+from paperless_macocr.ocr import MacOCRClient, OcrPageData
 from paperless_macocr.paperless import PaperlessClient
-from paperless_macocr.pdf import pdf_has_text, pdf_page_count, pdf_page_to_png
+from paperless_macocr.pdf import (
+    image_to_searchable_pdf,
+    pdf_embed_text_layer,
+    pdf_has_text,
+    pdf_page_count,
+    pdf_page_to_png,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -154,8 +161,8 @@ async def process_document(document_id: int) -> None:
         logger.info("Document %d already has extractable text - skipping", document_id)
         return
 
-    # 4. OCR via macOCR
-    all_text: list[str] = []
+    # 4. OCR via macOCR -- collect per-page results
+    page_results: list[OcrPageData] = []
 
     if is_pdf:
         num_pages = pdf_page_count(file_bytes)
@@ -165,17 +172,17 @@ async def process_document(document_id: int) -> None:
             logger.debug("Rendering page %d/%d at %d DPI", page_idx + 1, num_pages, settings.ocr_dpi)
             png_bytes = pdf_page_to_png(file_bytes, page_idx, dpi=settings.ocr_dpi)
 
-            page_text = await macocr.ocr_image(png_bytes, filename=f"page_{page_idx + 1:04d}.png")
-            all_text.append(page_text.strip())
-            logger.debug("Page %d: %d chars extracted", page_idx + 1, len(page_text))
+            result = await macocr.ocr_image(png_bytes, filename=f"page_{page_idx + 1:04d}.png")
+            page_results.append(result)
+            logger.debug("Page %d: %d chars extracted", page_idx + 1, len(result.text))
     else:
         # Image file - send directly to macOCR
         logger.info("Document %d is an image (%s), sending directly to macOCR", document_id, mime_type)
         ext = mime_type.split("/")[-1]
-        page_text = await macocr.ocr_image(file_bytes, filename=f"document.{ext}", content_type=mime_type)
-        all_text.append(page_text.strip())
+        result = await macocr.ocr_image(file_bytes, filename=f"document.{ext}", content_type=mime_type)
+        page_results.append(result)
 
-    combined_text = "\n\n".join(t for t in all_text if t)
+    combined_text = "\n\n".join(r.text.strip() for r in page_results if r.text.strip())
 
     if not combined_text:
         logger.warning("No text extracted from document %d", document_id)
@@ -184,6 +191,83 @@ async def process_document(document_id: int) -> None:
     # 5. Update Paperless-NGX document content
     await paperless.update_document_content(document_id, combined_text)
     logger.info("Document %d OCR complete (%d chars)", document_id, len(combined_text))
+
+    # 6. Optionally replace the document with a searchable PDF
+    if settings.replace_pdf:
+        await _replace_with_searchable_pdf(
+            document_id, doc_meta, file_bytes, page_results, is_pdf, mime_type, combined_text
+        )
+
+
+_TASK_POLL_INTERVAL = 2  # seconds
+_TASK_POLL_MAX = 60  # max attempts
+
+
+async def _replace_with_searchable_pdf(
+    document_id: int,
+    doc_meta: dict,
+    file_bytes: bytes,
+    page_results: list[OcrPageData],
+    is_pdf: bool,
+    mime_type: str,
+    combined_text: str,
+) -> None:
+    """Build a searchable PDF and upload it to Paperless, replacing the original."""
+    paperless = state.paperless
+
+    # Build searchable PDF
+    if is_pdf:
+        searchable_pdf = pdf_embed_text_layer(file_bytes, page_results)
+    else:
+        ext = mime_type.split("/")[-1]
+        searchable_pdf = image_to_searchable_pdf(file_bytes, page_results[0], image_format=ext)
+
+    logger.info("Built searchable PDF for document %d (%d bytes)", document_id, len(searchable_pdf))
+
+    # Upload to Paperless
+    title = doc_meta.get("title", f"doc-{document_id}")
+    task_uuid = await paperless.upload_document(
+        searchable_pdf,
+        f"{title}.pdf",
+        title=title,
+        correspondent=doc_meta.get("correspondent"),
+        document_type=doc_meta.get("document_type"),
+        storage_path=doc_meta.get("storage_path"),
+        tags=doc_meta.get("tags"),
+        archive_serial_number=doc_meta.get("archive_serial_number"),
+    )
+
+    # Wait for consumption to complete
+    new_doc_id = None
+    for _ in range(_TASK_POLL_MAX):
+        await asyncio.sleep(_TASK_POLL_INTERVAL)
+        task = await paperless.get_task(task_uuid)
+        status = task.get("status", "")
+        if status == "SUCCESS":
+            new_doc_id = task.get("related_document")
+            break
+        if status == "FAILURE":
+            logger.error(
+                "Consumption failed for document %d: %s",
+                document_id,
+                task.get("result", "unknown error"),
+            )
+            return
+
+    if new_doc_id is None:
+        logger.error("Consumption timed out for document %d (task %s)", document_id, task_uuid)
+        return
+
+    # Set OCR content on the new document
+    await paperless.update_document_content(new_doc_id, combined_text)
+
+    # Delete the original document
+    await paperless.delete_document(document_id)
+    logger.info(
+        "Replaced document %d with searchable PDF (new id: %s)",
+        document_id,
+        new_doc_id,
+    )
 
 
 # ---------------------------------------------------------------------------
