@@ -52,7 +52,7 @@
         <a href="/ui/ocr/{{ doc.id }}" class="btn btn-sm btn-primary">OCR</a>
       </div>
     </div>
-  {% empty %}
+  {% else %}
     <p class="muted" style="padding: 2rem; text-align: center;">No documents found.</p>
   {% endfor %}
 </div>
