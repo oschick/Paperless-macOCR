@@ -165,3 +165,63 @@ class PaperlessClient:
         response = await self._client.get(f"/api/documents/{document_id}/thumb/")
         response.raise_for_status()
         return response.content
+
+    async def _list_all(self, path: str) -> list[dict[str, Any]]:
+        """Paginate through all pages of a resource endpoint."""
+        results: list[dict[str, Any]] = []
+        url = f"{path}?page_size=500"
+        base = str(self._client.base_url).rstrip("/")
+        while url:
+            response = await self._client.get(url)
+            response.raise_for_status()
+            data = response.json()
+            results.extend(data.get("results", []))
+            next_url: str = data.get("next") or ""
+            if next_url.startswith(base):
+                next_url = next_url[len(base):]
+            url = next_url
+        return results
+
+    async def list_correspondents(self) -> list[dict[str, Any]]:
+        """Return all correspondents (id, name)."""
+        return await self._list_all("/api/correspondents/")
+
+    async def list_document_types(self) -> list[dict[str, Any]]:
+        """Return all document types (id, name)."""
+        return await self._list_all("/api/document_types/")
+
+    async def update_document_metadata(
+        self,
+        document_id: int,
+        *,
+        title: str | None = None,
+        created: str | None = None,
+        correspondent: int | None = None,
+        document_type: int | None = None,
+        tags: list[int] | None = None,
+        content: str | None = None,
+    ) -> dict[str, Any]:
+        """PATCH arbitrary metadata fields on a document."""
+        payload: dict[str, Any] = {}
+        if title is not None:
+            payload["title"] = title
+        if created is not None:
+            payload["created"] = created
+        if correspondent is not None:
+            payload["correspondent"] = correspondent
+        if document_type is not None:
+            payload["document_type"] = document_type
+        if tags is not None:
+            payload["tags"] = tags
+        if content is not None:
+            payload["content"] = content
+        if not payload:
+            return {}
+        response = await self._client.patch(
+            f"/api/documents/{document_id}/",
+            json=payload,
+        )
+        response.raise_for_status()
+        result: dict[str, Any] = response.json()
+        logger.info("Updated metadata for document %d: %s", document_id, list(payload))
+        return result

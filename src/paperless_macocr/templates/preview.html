@@ -13,6 +13,28 @@
     box-shadow: 0 2px 8px rgba(0,0,0,.25); display: none;
     white-space: pre-wrap; word-break: break-word;
   }
+  .meta-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.75rem 1.5rem;
+    margin-bottom: 1rem;
+  }
+  @media (max-width: 640px) { .meta-grid { grid-template-columns: 1fr; } }
+  .meta-grid label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 0.2rem; }
+  .tag-pill {
+    display: inline-flex; align-items: center; gap: 0.3rem;
+    padding: 0.15rem 0.5rem; border-radius: 12px;
+    background: var(--badge-bg); font-size: 0.8rem; margin: 0.2rem 0.2rem 0 0;
+  }
+  .tag-pill button {
+    border: none; background: none; cursor: pointer; color: var(--muted);
+    padding: 0; line-height: 1; font-size: 0.9rem;
+  }
+  .tag-pill button:hover { color: var(--danger); }
+  #tag-input-wrap { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
+  #tag-chips { display: flex; flex-wrap: wrap; gap: 0; }
+  #tag-input { flex: 1; min-width: 120px; width: auto; }
+  #tags-hidden { display: none; }
 </style>
 {% endblock %}
 {% block content %}
@@ -96,13 +118,75 @@
 </div>
 {% endif %}
 
+<!-- datalists for autocomplete -->
+<datalist id="dl-correspondents">
+  {% for c in correspondents %}<option value="{{ c.name }}">{% endfor %}
+</datalist>
+<datalist id="dl-doctypes">
+  {% for d in document_types %}<option value="{{ d.name }}">{% endfor %}
+</datalist>
+<datalist id="dl-tags">
+  {% for t in all_tags %}<option value="{{ t.name }}">{% endfor %}
+</datalist>
+
 <!-- Approve form -->
 <div class="card mt-2" style="border-color: var(--success);">
   <h3 class="mb-1">Approve & Apply OCR</h3>
   <form method="post" action="/ui/ocr/{{ document_id }}/approve">
-    <textarea name="combined_text" rows="6" class="mb-1"
-              style="font-family: monospace; font-size: 0.85rem;">{{ combined_text }}</textarea>
-    <div class="flex items-center gap-2 mt-1">
+
+    <!-- Metadata fields -->
+    <div class="meta-grid mb-1">
+      <div>
+        <label for="f-title">Title</label>
+        <input type="text" id="f-title" name="title"
+               value="{{ doc.title or '' }}">
+      </div>
+      <div>
+        <label for="f-created">Date created</label>
+        <input type="date" id="f-created" name="created"
+               value="{{ (doc.created or '')[:10] }}">
+      </div>
+      <div>
+        <label for="f-correspondent">Correspondent</label>
+        <input type="text" id="f-correspondent" name="correspondent"
+               list="dl-correspondents" autocomplete="off"
+               value="{{ doc.correspondent__name or '' }}">
+      </div>
+      <div>
+        <label for="f-doctype">Document type</label>
+        <input type="text" id="f-doctype" name="document_type"
+               list="dl-doctypes" autocomplete="off"
+               value="{{ doc.document_type__name or '' }}">
+      </div>
+      <div style="grid-column: 1 / -1;">
+        <label>Tags</label>
+        <div id="tag-input-wrap"
+             style="border:1px solid var(--border); border-radius:6px; padding:0.3rem 0.5rem; background:var(--card-bg);">
+          <div id="tag-chips">
+            {% for name in tag_names %}
+              <span class="tag-pill" data-name="{{ name }}">
+                {{ name }}
+                <button type="button" onclick="removeTag(this)" title="Remove">×</button>
+              </span>
+            {% endfor %}
+          </div>
+          <input type="text" id="tag-input" list="dl-tags"
+                 autocomplete="off" placeholder="Add tag…"
+                 style="border:none; outline:none; background:transparent; padding:0.1rem 0;">
+        </div>
+        <!-- hidden field: comma-separated tag names sent to server -->
+        <input type="hidden" id="tags-hidden" name="tags">
+      </div>
+    </div>
+
+    <!-- OCR text -->
+    <label for="f-text" style="font-size:0.8rem; color:var(--muted);">
+      OCR text ({{ combined_text|length }} chars)
+    </label>
+    <textarea id="f-text" name="combined_text" rows="6"
+              style="font-family: monospace; font-size: 0.85rem; margin-bottom:0.5rem;">{{ combined_text }}</textarea>
+
+    <div class="flex items-center gap-2">
       <label class="flex items-center gap-1 text-sm">
         <input type="checkbox" name="replace_pdf" {% if is_pdf %}checked{% endif %}>
         Also rebuild searchable PDF
@@ -114,6 +198,9 @@
     </div>
   </form>
 </div>
+
+{# Embed OCR data before the script that reads it #}
+<script id="ocr-data-json" type="application/json">{{ ocr_data_json | safe }}</script>
 
 <script>
 function showTab(tab) {
@@ -235,8 +322,49 @@ window.addEventListener('resize', () => {
   if (!_boxesOn) return;
   _ocrPages.forEach((_, idx) => _renderBoxes(idx));
 });
+
+// ── Tag chip input ─────────────────────────────────────────────────
+const _tagInput  = document.getElementById('tag-input');
+const _tagChips  = document.getElementById('tag-chips');
+const _tagsHid   = document.getElementById('tags-hidden');
+const _dlTags    = document.getElementById('dl-tags');
+
+function _allTagNames() {
+  return [..._tagChips.querySelectorAll('.tag-pill')].map(el => el.dataset.name);
+}
+function _syncHidden() {
+  _tagsHid.value = _allTagNames().join(',');
+}
+function removeTag(btn) {
+  btn.closest('.tag-pill').remove();
+  _syncHidden();
+}
+function _addTag(name) {
+  name = name.trim();
+  if (!name || _allTagNames().includes(name)) return;
+  const pill = document.createElement('span');
+  pill.className = 'tag-pill';
+  pill.dataset.name = name;
+  pill.innerHTML = name + ' <button type="button" onclick="removeTag(this)" title="Remove">\xd7</button>';
+  _tagChips.appendChild(pill);
+  _syncHidden();
+}
+_tagInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter' || e.key === ',') {
+    e.preventDefault();
+    _addTag(_tagInput.value);
+    _tagInput.value = '';
+  }
+});
+_tagInput.addEventListener('change', () => {
+  // fires when user picks from datalist
+  if ([..._dlTags.options].some(o => o.value === _tagInput.value)) {
+    _addTag(_tagInput.value);
+    _tagInput.value = '';
+  }
+});
+// Seed hidden field with existing chips on page load
+_syncHidden();
 </script>
 
-{# Embed OCR data for JS consumption #}
-<script id="ocr-data-json" type="application/json">{{ ocr_data_json | safe }}</script>
 {% endblock %}

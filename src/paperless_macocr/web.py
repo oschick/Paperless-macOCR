@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from paperless_macocr.auth import (
@@ -222,6 +222,7 @@ async def ocr_preview(request: Request, document_id: int):
     existing_text = doc_meta.get("content", "").strip()
     has_existing = bool(existing_text)
     tag_map = await _get_tag_map()
+    correspondents, doc_types, all_tags = await _gather_meta_options()
 
     return templates.TemplateResponse(
         request,
@@ -239,6 +240,10 @@ async def ocr_preview(request: Request, document_id: int):
             "tag_names": [tag_map.get(t, f"#{t}") for t in doc_meta.get("tags", [])],
             "user": _user(request),
             "auth_mode": _settings.web_ui_auth,  # type: ignore[union-attr]
+            # Metadata options for autocomplete
+            "correspondents": correspondents,
+            "document_types": doc_types,
+            "all_tags": all_tags,
             # Store serialised OCR data in a hidden field for approval
             "ocr_data_json": _serialize_ocr_data(page_results),
         },
@@ -247,7 +252,7 @@ async def ocr_preview(request: Request, document_id: int):
 
 @router.post("/ui/ocr/{document_id}/approve")
 async def ocr_approve(request: Request, document_id: int):
-    """Apply the OCR results to the document in Paperless."""
+    """Apply the OCR results and metadata edits to the document in Paperless."""
     _require("_settings", "_paperless", "_macocr")
 
     form = await request.form()
@@ -257,9 +262,42 @@ async def ocr_approve(request: Request, document_id: int):
     if not combined_text.strip():
         raise HTTPException(status_code=422, detail="No text to approve")
 
-    # Update document content
-    await _paperless.update_document_content(document_id, combined_text)  # type: ignore[union-attr]
-    logger.info("Web UI: approved OCR for document %d (%d chars)", document_id, len(combined_text))
+    # ── Resolve metadata fields ──────────────────────────────────────
+    title = str(form.get("title", "")).strip() or None
+    created = str(form.get("created", "")).strip() or None
+
+    # Correspondent / document type: form sends the name; resolve to ID
+    correspondents, doc_types, all_tags = await _gather_meta_options()
+    corr_name = str(form.get("correspondent", "")).strip()
+    dtype_name = str(form.get("document_type", "")).strip()
+    tag_names_raw = str(form.get("tags", "")).strip()
+
+    corr_id: int | None = None
+    if corr_name:
+        match = next((c for c in correspondents if c["name"] == corr_name), None)
+        corr_id = match["id"] if match else None
+
+    dtype_id: int | None = None
+    if dtype_name:
+        match = next((d for d in doc_types if d["name"] == dtype_name), None)
+        dtype_id = match["id"] if match else None
+
+    tag_ids: list[int] | None = None
+    if tag_names_raw:
+        name_to_id = {t["name"]: t["id"] for t in all_tags}
+        tag_ids = [name_to_id[n.strip()] for n in tag_names_raw.split(",") if n.strip() in name_to_id]
+
+    # ── Patch document (single PATCH with all changed fields) ────────
+    await _paperless.update_document_metadata(  # type: ignore[union-attr]
+        document_id,
+        title=title,
+        created=created,
+        correspondent=corr_id,
+        document_type=dtype_id,
+        tags=tag_ids,
+        content=combined_text,
+    )
+    logger.info("Web UI: approved OCR + metadata for document %d", document_id)
 
     # Optionally rebuild the PDF with embedded text layer
     if build_pdf:
@@ -293,6 +331,30 @@ async def thumbnail(document_id: int):
     _require("_paperless")
     data = await _paperless.get_thumbnail(document_id)  # type: ignore[union-attr]
     return Response(content=data, media_type="image/webp")
+
+
+# ─── Metadata options (autocomplete) ────────────────────────────────
+
+
+@router.get("/ui/meta-options")
+async def meta_options():
+    """Return all correspondents, document types, and tags for autocomplete."""
+    _require("_paperless")
+    correspondents, doc_types, tags = await _gather_meta_options()
+    return JSONResponse(
+        {
+            "correspondents": [{"id": c["id"], "name": c["name"]} for c in correspondents],
+            "document_types": [{"id": d["id"], "name": d["name"]} for d in doc_types],
+            "tags": [{"id": t["id"], "name": t["name"]} for t in tags],
+        }
+    )
+
+
+async def _gather_meta_options() -> tuple[list, list, list]:
+    correspondents = await _paperless.list_correspondents()  # type: ignore[union-attr]
+    doc_types = await _paperless.list_document_types()  # type: ignore[union-attr]
+    tags = await _paperless.list_tags()  # type: ignore[union-attr]
+    return correspondents, doc_types, tags
 
 
 # ─── Helpers ────────────────────────────────────────────────────────
