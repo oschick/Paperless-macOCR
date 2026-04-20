@@ -1,5 +1,32 @@
 {% extends "base.html" %}
 {% block title %}Documents - Paperless macOCR{% endblock %}
+{% block extra_head %}
+<style>
+  .thumb-wrap {
+    position: relative;
+    flex-shrink: 0;
+  }
+  .thumb-wrap .thumb-zoom {
+    display: none;
+    position: absolute;
+    left: 0; top: 0;
+    z-index: 100;
+    width: 220px;
+    height: auto;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    box-shadow: 0 8px 24px rgba(0,0,0,.35);
+    object-fit: contain;
+    background: var(--card-bg);
+    /* pop upward so it doesn't go off-screen below */
+    transform: translateY(calc(-50% + 40px));
+    pointer-events: none;
+  }
+  .thumb-wrap:hover .thumb-zoom {
+    display: block;
+  }
+</style>
+{% endblock %}
 {% block content %}
 
 {% if request.query_params.get('approved') %}
@@ -29,7 +56,10 @@
 <div class="card">
   {% for doc in documents %}
     <div class="doc-row">
-      <img src="/ui/thumb/{{ doc.id }}" class="thumb" alt="Thumbnail" loading="lazy">
+      <div class="thumb-wrap">
+        <img src="/ui/thumb/{{ doc.id }}" class="thumb" alt="Thumbnail" loading="lazy">
+        <img src="/ui/thumb/{{ doc.id }}" class="thumb-zoom" alt="" loading="lazy">
+      </div>
       <div class="doc-info">
         <div class="doc-title">
           <span class="status-dot {{ 'status-has-text' if doc.has_content else 'status-no-text' }}"

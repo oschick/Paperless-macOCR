@@ -1,5 +1,20 @@
 {% extends "base.html" %}
 {% block title %}OCR Preview - {{ doc.title or "Document" }} - Paperless macOCR{% endblock %}
+{% block extra_head %}
+<style>
+  .bbox-wrap { position: relative; display: block; }
+  .bbox-canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
+  .bbox-canvas.interactive { pointer-events: auto; cursor: crosshair; }
+  #bbox-tooltip {
+    position: fixed; z-index: 1000; max-width: 280px;
+    background: var(--card-bg); border: 1px solid var(--primary);
+    border-radius: 6px; padding: 0.35rem 0.6rem;
+    font-size: 0.78rem; line-height: 1.4; pointer-events: none;
+    box-shadow: 0 2px 8px rgba(0,0,0,.25); display: none;
+    white-space: pre-wrap; word-break: break-word;
+  }
+</style>
+{% endblock %}
 {% block content %}
 
 <div class="flex flex-between items-center mb-2">
@@ -29,8 +44,11 @@
     {% if has_existing %}
       <button class="btn btn-sm" style="border-color: var(--border);" onclick="showTab('compare')">Compare</button>
     {% endif %}
+    <button id="btn-boxes" class="btn btn-sm" style="border-color: var(--border);"
+            onclick="toggleBoxes(this)">Show Boxes</button>
   </div>
 </div>
+<div id="bbox-tooltip"></div>
 
 <!-- Page-by-page view -->
 <div id="tab-pages">
@@ -39,7 +57,11 @@
       <h3 class="mb-1">Page {{ i + 1 }}</h3>
       <div class="preview-grid">
         <div class="page-preview">
-          <img src="data:image/png;base64,{{ page_previews[i] }}" alt="Page {{ i + 1 }}">
+          <div class="bbox-wrap">
+            <img id="preview-img-{{ i }}" src="data:image/png;base64,{{ page_previews[i] }}"
+                 alt="Page {{ i + 1 }}" style="display:block; max-width:100%;">
+            <canvas id="bbox-canvas-{{ i }}" class="bbox-canvas hidden"></canvas>
+          </div>
         </div>
         <div>
           <div class="text-sm muted mb-1">OCR Text ({{ page_texts[i]|length }} chars)</div>
@@ -98,5 +120,123 @@ function showTab(tab) {
   document.querySelectorAll('[id^="tab-"]').forEach(el => el.classList.add('hidden'));
   document.getElementById('tab-' + tab).classList.remove('hidden');
 }
+
+// ── Bounding-box overlay ──────────────────────────────────────────
+const _ocrPages = JSON.parse(document.getElementById('ocr-data-json').textContent);
+let _boxesOn = false;
+
+function toggleBoxes(btn) {
+  _boxesOn = !_boxesOn;
+  btn.textContent = _boxesOn ? 'Hide Boxes' : 'Show Boxes';
+  btn.style.color = _boxesOn ? 'var(--primary)' : '';
+  btn.style.borderColor = _boxesOn ? 'var(--primary)' : 'var(--border)';
+  _ocrPages.forEach((_, idx) => {
+    const canvas = document.getElementById('bbox-canvas-' + idx);
+    if (!canvas) return;
+    if (_boxesOn) {
+      _renderBoxes(idx);
+      canvas.classList.remove('hidden');
+      canvas.classList.add('interactive');
+    } else {
+      canvas.classList.add('hidden');
+      canvas.classList.remove('interactive');
+    }
+  });
+}
+
+function _renderBoxes(idx) {
+  const page = _ocrPages[idx];
+  if (!page || !page.boxes || !page.boxes.length) return;
+  const img = document.getElementById('preview-img-' + idx);
+  const canvas = document.getElementById('bbox-canvas-' + idx);
+  if (!img || !canvas) return;
+
+  const dw = img.offsetWidth, dh = img.offsetHeight;
+  if (!dw || !dh) return;
+  canvas.width = dw;
+  canvas.height = dh;
+  canvas.style.width = dw + 'px';
+  canvas.style.height = dh + 'px';
+
+  const iw = page.image_width || img.naturalWidth || dw;
+  const ih = page.image_height || img.naturalHeight || dh;
+  const sx = dw / iw, sy = dh / ih;
+
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, dw, dh);
+
+  for (const box of page.boxes) {
+    const r = box.rect;
+    if (!r) continue;
+    const tlx = (r.top_left_x    ?? r.topLeft_x    ?? 0) * sx;
+    const tly = (r.top_left_y    ?? r.topLeft_y    ?? 0) * sy;
+    const trx = (r.top_right_x   ?? r.topRight_x   ?? 0) * sx;
+    const try_ = (r.top_right_y  ?? r.topRight_y   ?? 0) * sy;
+    const brx = (r.bottom_right_x ?? r.bottomRight_x ?? 0) * sx;
+    const bry = (r.bottom_right_y ?? r.bottomRight_y ?? 0) * sy;
+    const blx = (r.bottom_left_x  ?? r.bottomLeft_x  ?? 0) * sx;
+    const bly = (r.bottom_left_y  ?? r.bottomLeft_y  ?? 0) * sy;
+
+    ctx.beginPath();
+    ctx.moveTo(tlx, tly);
+    ctx.lineTo(trx, try_);
+    ctx.lineTo(brx, bry);
+    ctx.lineTo(blx, bly);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(74,144,226,0.15)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(74,144,226,0.85)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+}
+
+// Tooltip on hover
+const _tooltip = document.getElementById('bbox-tooltip');
+document.addEventListener('mousemove', e => {
+  if (!_boxesOn) { _tooltip.style.display = 'none'; return; }
+  const canvas = e.target.closest('canvas.interactive');
+  if (!canvas) { _tooltip.style.display = 'none'; return; }
+
+  const idx = parseInt(canvas.id.replace('bbox-canvas-', ''), 10);
+  const page = _ocrPages[idx];
+  if (!page) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  const iw = page.image_width || 1, ih = page.image_height || 1;
+  const sx = (page.image_width || iw) / canvas.width;
+  const sy = (page.image_height || ih) / canvas.height;
+  const ix = mx * (iw / canvas.width), iy = my * (ih / canvas.height);
+
+  let hit = null;
+  for (const box of page.boxes) {
+    const r = box.rect;
+    if (!r) continue;
+    const minX = Math.min(r.top_left_x ?? r.topLeft_x ?? 0, r.bottom_left_x ?? r.bottomLeft_x ?? 0);
+    const maxX = Math.max(r.top_right_x ?? r.topRight_x ?? 0, r.bottom_right_x ?? r.bottomRight_x ?? 0);
+    const minY = Math.min(r.top_left_y ?? r.topLeft_y ?? 0, r.top_right_y ?? r.topRight_y ?? 0);
+    const maxY = Math.max(r.bottom_left_y ?? r.bottomLeft_y ?? 0, r.bottom_right_y ?? r.bottomRight_y ?? 0);
+    if (ix >= minX && ix <= maxX && iy >= minY && iy <= maxY) { hit = box; break; }
+  }
+
+  if (hit && hit.text) {
+    _tooltip.textContent = hit.text;
+    _tooltip.style.display = 'block';
+    _tooltip.style.left = (e.clientX + 12) + 'px';
+    _tooltip.style.top  = (e.clientY + 12) + 'px';
+  } else {
+    _tooltip.style.display = 'none';
+  }
+});
+
+// Redraw on window resize
+window.addEventListener('resize', () => {
+  if (!_boxesOn) return;
+  _ocrPages.forEach((_, idx) => _renderBoxes(idx));
+});
 </script>
+
+{# Embed OCR data for JS consumption #}
+<script id="ocr-data-json" type="application/json">{{ ocr_data_json | safe }}</script>
 {% endblock %}
