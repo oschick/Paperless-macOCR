@@ -178,7 +178,7 @@ class PaperlessClient:
             results.extend(data.get("results", []))
             next_url: str = data.get("next") or ""
             if next_url.startswith(base):
-                next_url = next_url[len(base):]
+                next_url = next_url[len(base) :]
             url = next_url
         return results
 
