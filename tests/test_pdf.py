@@ -5,6 +5,7 @@ import pytest
 
 from paperless_macocr.ocr import OcrPageData
 from paperless_macocr.pdf import (
+    _strip_text_layer,
     image_to_searchable_pdf,
     pdf_embed_text_layer,
     pdf_has_text,
@@ -295,3 +296,85 @@ def test_pdf_embed_text_layer_rect_horizontal_no_morph(blank_pdf):
     result = pdf_embed_text_layer(blank_pdf, page_data)
     with pymupdf.open(stream=result, filetype="pdf") as doc:
         assert "Flat" in doc[0].get_text()
+
+
+# ---- text stripping tests ----
+
+
+@pytest.fixture
+def scanned_pdf_with_text() -> bytes:
+    """Create a PDF with an image background and an invisible OCR text layer."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=200, height=200)
+    # Simulate scan: create an image and embed it
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 200, 200), 1)
+    pix.set_rect(pix.irect, (240, 240, 230, 255))
+    page.insert_image(page.rect, pixmap=pix)
+    # Add invisible OCR text (like a bad previous OCR pass)
+    page.insert_text(
+        pymupdf.Point(20, 50), "Old inaccurate text", fontsize=10, fontname="helv", render_mode=3
+    )
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+
+def test_strip_text_layer_removes_text(scanned_pdf_with_text):
+    """_strip_text_layer should remove text from a page."""
+    with pymupdf.open(stream=scanned_pdf_with_text, filetype="pdf") as doc:
+        page = doc[0]
+        assert page.get_text().strip()  # text exists before
+        _strip_text_layer(page)
+        assert not page.get_text().strip()  # text gone after
+
+
+def test_strip_text_layer_preserves_images(scanned_pdf_with_text):
+    """_strip_text_layer should preserve embedded images."""
+    with pymupdf.open(stream=scanned_pdf_with_text, filetype="pdf") as doc:
+        page = doc[0]
+        images_before = page.get_images()
+        _strip_text_layer(page)
+        images_after = page.get_images()
+        assert len(images_after) == len(images_before)
+
+
+def test_strip_text_layer_blank_page_is_noop(blank_pdf):
+    """_strip_text_layer on a page without text should be harmless."""
+    with pymupdf.open(stream=blank_pdf, filetype="pdf") as doc:
+        page = doc[0]
+        _strip_text_layer(page)  # should not raise
+        assert not page.get_text().strip()
+
+
+def test_embed_replaces_existing_text(scanned_pdf_with_text):
+    """pdf_embed_text_layer should strip old text and insert new OCR text."""
+    page_data = [
+        OcrPageData(
+            text="New OCR text",
+            boxes=[{"text": "New OCR text", "x": 10, "y": 20, "w": 120, "h": 14}],
+            image_width=200.0,
+            image_height=200.0,
+        )
+    ]
+    result = pdf_embed_text_layer(scanned_pdf_with_text, page_data)
+    with pymupdf.open(stream=result, filetype="pdf") as doc:
+        text = doc[0].get_text()
+        assert "New OCR text" in text
+        assert "Old inaccurate" not in text
+
+
+def test_embed_replaces_visible_text(text_pdf):
+    """pdf_embed_text_layer should strip even visible text and replace with OCR."""
+    page_data = [
+        OcrPageData(
+            text="Replaced",
+            boxes=[{"text": "Replaced", "x": 10, "y": 20, "w": 80, "h": 14}],
+            image_width=200.0,
+            image_height=200.0,
+        )
+    ]
+    result = pdf_embed_text_layer(text_pdf, page_data)
+    with pymupdf.open(stream=result, filetype="pdf") as doc:
+        text = doc[0].get_text()
+        assert "Replaced" in text
+        assert "Hello World" not in text

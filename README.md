@@ -190,7 +190,7 @@ All settings are configured via environment variables (or a `.env` file):
 
 ## Searchable PDF Replacement
 
-When `REPLACE_PDF=true`, the service doesn't just update the text content — it also builds a new PDF with an **invisible text layer** positioned using the bounding boxes returned by macOCR. This searchable PDF is uploaded to Paperless-NGX as a new document (with all metadata copied), and the original document is deleted.
+When `REPLACE_PDF=true`, the service doesn't just update the text content — it also builds a new PDF with an **invisible text layer** positioned using the bounding boxes returned by macOCR. This searchable PDF is uploaded to Paperless-NGX as a new document (with all metadata copied), and the **original document is deleted**.
 
 **Why?** By default, Paperless-NGX's PDF preview uses its own OCR results for text selection and search highlighting. Replacing the document with a searchable PDF ensures the preview, text selection, and copy-paste all use the more accurate macOCR results.
 

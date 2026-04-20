@@ -200,11 +200,29 @@ def _ensure_text(page: Any) -> None:
     )
 
 
+def _strip_text_layer(page: Any) -> None:
+    """Remove all text content from *page* while preserving images.
+
+    Uses full-page redaction with ``fill=False`` and image preservation
+    so that scanned images remain intact but any existing (possibly
+    inaccurate) OCR text layer is removed.
+    """
+    if not page.get_text().strip():
+        return  # nothing to strip
+    page.add_redact_annot(page.rect, fill=False)
+    page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE)
+
+
 def pdf_embed_text_layer(
     pdf_bytes: bytes,
     page_data: list[OcrPageData],
 ) -> bytes:
     """Return a copy of *pdf_bytes* with an invisible OCR text layer.
+
+    If a page already contains text it is stripped first via redaction
+    (preserving images) before the new OCR text is overlaid.  This
+    ensures inaccurate existing text layers are replaced rather than
+    doubled up.
 
     For each page the bounding-box coordinates from *page_data* are
     scaled from image-pixel space to PDF-point space and inserted as
@@ -216,6 +234,7 @@ def pdf_embed_text_layer(
     """
     with pymupdf.open(stream=pdf_bytes, filetype="pdf") as doc:
         for page_idx, page in enumerate(doc):
+            _strip_text_layer(page)
             if page_idx >= len(page_data):
                 _ensure_text(page)
                 continue
