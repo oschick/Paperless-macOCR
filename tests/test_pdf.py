@@ -311,9 +311,7 @@ def scanned_pdf_with_text() -> bytes:
     pix.set_rect(pix.irect, (240, 240, 230, 255))
     page.insert_image(page.rect, pixmap=pix)
     # Add invisible OCR text (like a bad previous OCR pass)
-    page.insert_text(
-        pymupdf.Point(20, 50), "Old inaccurate text", fontsize=10, fontname="helv", render_mode=3
-    )
+    page.insert_text(pymupdf.Point(20, 50), "Old inaccurate text", fontsize=10, fontname="helv", render_mode=3)
     data = doc.tobytes()
     doc.close()
     return data
