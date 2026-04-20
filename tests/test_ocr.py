@@ -2,8 +2,10 @@
 
 from paperless_macocr.ocr import (
     _avg_char_width,
+    _box_angle_deg,
     _cluster_text,
     _format_table,
+    _get_rect_corners,
     _reconstruct_text,
     _split_into_clusters,
 )
@@ -221,3 +223,259 @@ class TestReconstructText:
         result = _reconstruct_text(data)
         assert result.index("first") < result.index("second")
         assert result.index("second") < result.index("third")
+
+
+class TestGetRectCorners:
+    def test_snake_case(self):
+        """macOCR snake_case format."""
+        box = {
+            "text": "Hello",
+            "x": 10,
+            "y": 20,
+            "w": 100,
+            "h": 14,
+            "rect": {
+                "top_left_x": 10.0,
+                "top_left_y": 20.0,
+                "top_right_x": 110.0,
+                "top_right_y": 20.0,
+                "bottom_right_x": 110.0,
+                "bottom_right_y": 34.0,
+                "bottom_left_x": 10.0,
+                "bottom_left_y": 34.0,
+            },
+        }
+        corners = _get_rect_corners(box)
+        assert corners is not None
+        tl, tr, br, bl = corners
+        assert tl == (10.0, 20.0)
+        assert tr == (110.0, 20.0)
+        assert br == (110.0, 34.0)
+        assert bl == (10.0, 34.0)
+
+    def test_camel_case(self):
+        """iOS-OCR-Server camelCase format."""
+        box = {
+            "text": "Hello",
+            "x": 10,
+            "y": 20,
+            "w": 100,
+            "h": 14,
+            "rect": {
+                "topLeft_x": 10.0,
+                "topLeft_y": 20.0,
+                "topRight_x": 110.0,
+                "topRight_y": 20.0,
+                "bottomRight_x": 110.0,
+                "bottomRight_y": 34.0,
+                "bottomLeft_x": 10.0,
+                "bottomLeft_y": 34.0,
+            },
+        }
+        corners = _get_rect_corners(box)
+        assert corners is not None
+        assert corners[0] == (10.0, 20.0)
+        assert corners[1] == (110.0, 20.0)
+
+    def test_missing_rect(self):
+        box = {"text": "Hello", "x": 10, "y": 20, "w": 100, "h": 14}
+        assert _get_rect_corners(box) is None
+
+    def test_incomplete_rect(self):
+        box = {
+            "text": "Hello",
+            "x": 10,
+            "y": 20,
+            "w": 100,
+            "h": 14,
+            "rect": {"top_left_x": 10.0, "top_left_y": 20.0},
+        }
+        assert _get_rect_corners(box) is None
+
+
+class TestBoxAngleDeg:
+    def test_horizontal(self):
+        box = {
+            "text": "Hello",
+            "x": 0,
+            "y": 0,
+            "w": 100,
+            "h": 14,
+            "rect": {
+                "top_left_x": 0.0,
+                "top_left_y": 0.0,
+                "top_right_x": 100.0,
+                "top_right_y": 0.0,
+                "bottom_right_x": 100.0,
+                "bottom_right_y": 14.0,
+                "bottom_left_x": 0.0,
+                "bottom_left_y": 14.0,
+            },
+        }
+        assert _box_angle_deg(box) == 0.0
+
+    def test_tilted_clockwise(self):
+        """Text going slightly downhill left-to-right."""
+        box = {
+            "text": "Hello",
+            "x": 0,
+            "y": 0,
+            "w": 100,
+            "h": 14,
+            "rect": {
+                "top_left_x": 0.0,
+                "top_left_y": 0.0,
+                "top_right_x": 100.0,
+                "top_right_y": 10.0,
+                "bottom_right_x": 100.0,
+                "bottom_right_y": 24.0,
+                "bottom_left_x": 0.0,
+                "bottom_left_y": 14.0,
+            },
+        }
+        angle = _box_angle_deg(box)
+        assert 5.0 < angle < 6.0  # ~5.7°
+
+    def test_vertical_90(self):
+        """Text reading top-to-bottom (90° clockwise)."""
+        box = {
+            "text": "Hello",
+            "x": 0,
+            "y": 0,
+            "w": 14,
+            "h": 100,
+            "rect": {
+                "top_left_x": 0.0,
+                "top_left_y": 0.0,
+                "top_right_x": 0.0,
+                "top_right_y": 100.0,
+                "bottom_right_x": 14.0,
+                "bottom_right_y": 100.0,
+                "bottom_left_x": 14.0,
+                "bottom_left_y": 0.0,
+            },
+        }
+        angle = _box_angle_deg(box)
+        assert abs(angle - 90.0) < 0.01
+
+    def test_no_rect_returns_zero(self):
+        box = {"text": "Hello", "x": 0, "y": 0, "w": 100, "h": 14}
+        assert _box_angle_deg(box) == 0.0
+
+
+class TestReconstructTextOrientation:
+    def test_vertical_boxes_separated(self):
+        """Vertical boxes are emitted after horizontal text."""
+        data = {
+            "ocr_boxes": [
+                {"text": "Normal", "x": 0, "y": 0, "w": 60, "h": 12},
+                {
+                    "text": "Sideways",
+                    "x": 200,
+                    "y": 0,
+                    "w": 12,
+                    "h": 60,
+                    "rect": {
+                        "top_left_x": 200.0,
+                        "top_left_y": 0.0,
+                        "top_right_x": 200.0,
+                        "top_right_y": 60.0,
+                        "bottom_right_x": 212.0,
+                        "bottom_right_y": 60.0,
+                        "bottom_left_x": 212.0,
+                        "bottom_left_y": 0.0,
+                    },
+                },
+            ],
+        }
+        result = _reconstruct_text(data)
+        assert "Normal" in result
+        assert "Sideways" in result
+        assert result.index("Normal") < result.index("Sideways")
+
+    def test_all_vertical(self):
+        """When all boxes are vertical, emit in spatial x,y order."""
+        data = {
+            "ocr_boxes": [
+                {
+                    "text": "Second",
+                    "x": 100,
+                    "y": 0,
+                    "w": 12,
+                    "h": 60,
+                    "rect": {
+                        "top_left_x": 100.0,
+                        "top_left_y": 0.0,
+                        "top_right_x": 100.0,
+                        "top_right_y": 60.0,
+                        "bottom_right_x": 112.0,
+                        "bottom_right_y": 60.0,
+                        "bottom_left_x": 112.0,
+                        "bottom_left_y": 0.0,
+                    },
+                },
+                {
+                    "text": "First",
+                    "x": 0,
+                    "y": 0,
+                    "w": 12,
+                    "h": 60,
+                    "rect": {
+                        "top_left_x": 0.0,
+                        "top_left_y": 0.0,
+                        "top_right_x": 0.0,
+                        "top_right_y": 60.0,
+                        "bottom_right_x": 12.0,
+                        "bottom_right_y": 60.0,
+                        "bottom_left_x": 12.0,
+                        "bottom_left_y": 0.0,
+                    },
+                },
+            ],
+        }
+        result = _reconstruct_text(data)
+        assert result.index("First") < result.index("Second")
+
+    def test_tilted_treated_as_horizontal(self):
+        """Slightly tilted text (< 45°) should still be grouped normally."""
+        data = {
+            "ocr_boxes": [
+                {
+                    "text": "Hello",
+                    "x": 0,
+                    "y": 0,
+                    "w": 100,
+                    "h": 14,
+                    "rect": {
+                        "top_left_x": 0.0,
+                        "top_left_y": 0.0,
+                        "top_right_x": 100.0,
+                        "top_right_y": 5.0,
+                        "bottom_right_x": 100.0,
+                        "bottom_right_y": 19.0,
+                        "bottom_left_x": 0.0,
+                        "bottom_left_y": 14.0,
+                    },
+                },
+                {
+                    "text": "World",
+                    "x": 0,
+                    "y": 20,
+                    "w": 100,
+                    "h": 14,
+                    "rect": {
+                        "top_left_x": 0.0,
+                        "top_left_y": 20.0,
+                        "top_right_x": 100.0,
+                        "top_right_y": 25.0,
+                        "bottom_right_x": 100.0,
+                        "bottom_right_y": 39.0,
+                        "bottom_left_x": 0.0,
+                        "bottom_left_y": 34.0,
+                    },
+                },
+            ],
+        }
+        result = _reconstruct_text(data)
+        assert "Hello" in result
+        assert "World" in result

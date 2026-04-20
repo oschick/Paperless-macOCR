@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import logging
+import math
 from typing import TYPE_CHECKING, Any
 
 import pymupdf
+
+from paperless_macocr.ocr import _get_rect_corners
 
 if TYPE_CHECKING:
     from paperless_macocr.ocr import OcrPageData
@@ -59,9 +62,10 @@ def _overlay_boxes(
 ) -> None:
     """Insert invisible text onto *page* from OCR bounding boxes.
 
-    The font size is computed so that the rendered text width exactly
-    matches the bounding box width.  Text is placed at the baseline
-    using ``insert_text`` to avoid line-height padding issues.
+    When the ``rect`` field provides oriented corner coordinates the text
+    is placed at the correct angle using a rotation morph.  For
+    axis-aligned boxes the font size is computed so that the rendered
+    text width exactly matches the bounding box width.
     """
     if not boxes or image_width <= 0 or image_height <= 0:
         return
@@ -76,30 +80,76 @@ def _overlay_boxes(
         text = box.get("text", "").strip()
         if not text:
             continue
-        x = box["x"] * scale_x
-        y = box["y"] * scale_y
-        w = box["w"] * scale_x
-        h = box["h"] * scale_y
-        if w <= 0 or h <= 0:
-            continue
 
-        # Compute the font size that makes the text exactly as wide
-        # as the bounding box.  Also cap at box height so it doesn't
-        # bleed vertically.
-        unit_width = font.text_length(text, fontsize=1)
-        fontsize = min(w / unit_width, h) if unit_width > 0 else h
-        fontsize = max(fontsize, 1.0)
+        corners = _get_rect_corners(box)
+        if corners:
+            tl, tr, _br, bl = corners
+            # Scale corners to PDF-point space
+            tl_pdf = (tl[0] * scale_x, tl[1] * scale_y)
+            tr_pdf = (tr[0] * scale_x, tr[1] * scale_y)
+            bl_pdf = (bl[0] * scale_x, bl[1] * scale_y)
 
-        # Baseline is at the bottom of the box minus a small descender
-        # allowance (~20% of fontsize).
-        baseline_y = y + h - fontsize * 0.2
-        page.insert_text(
-            pymupdf.Point(x, baseline_y),
-            text,
-            fontsize=fontsize,
-            fontname="helv",
-            render_mode=3,  # invisible
-        )
+            dx = tr_pdf[0] - tl_pdf[0]
+            dy = tr_pdf[1] - tl_pdf[1]
+            angle_deg = math.degrees(math.atan2(dy, dx))
+
+            text_w = math.sqrt(dx * dx + dy * dy)
+            perp_dx = bl_pdf[0] - tl_pdf[0]
+            perp_dy = bl_pdf[1] - tl_pdf[1]
+            text_h = math.sqrt(perp_dx * perp_dx + perp_dy * perp_dy)
+
+            if text_w <= 0 or text_h <= 0:
+                continue
+
+            unit_width = font.text_length(text, fontsize=1)
+            fontsize = min(text_w / unit_width, text_h) if unit_width > 0 else text_h
+            fontsize = max(fontsize, 1.0)
+
+            # Baseline: start at TL, move along TL→BL by (h - descender)
+            baseline_frac = (text_h - fontsize * 0.2) / text_h if text_h > 0 else 0.8
+            bx = tl_pdf[0] + perp_dx * baseline_frac
+            by = tl_pdf[1] + perp_dy * baseline_frac
+
+            insert_pt = pymupdf.Point(bx, by)
+
+            if abs(angle_deg) > 0.5:
+                page.insert_text(
+                    insert_pt,
+                    text,
+                    fontsize=fontsize,
+                    fontname="helv",
+                    render_mode=3,  # invisible
+                    morph=(insert_pt, pymupdf.Matrix(angle_deg)),
+                )
+            else:
+                page.insert_text(
+                    insert_pt,
+                    text,
+                    fontsize=fontsize,
+                    fontname="helv",
+                    render_mode=3,
+                )
+        else:
+            # Fallback: axis-aligned placement from x/y/w/h
+            x = box["x"] * scale_x
+            y = box["y"] * scale_y
+            w = box["w"] * scale_x
+            h = box["h"] * scale_y
+            if w <= 0 or h <= 0:
+                continue
+
+            unit_width = font.text_length(text, fontsize=1)
+            fontsize = min(w / unit_width, h) if unit_width > 0 else h
+            fontsize = max(fontsize, 1.0)
+
+            baseline_y = y + h - fontsize * 0.2
+            page.insert_text(
+                pymupdf.Point(x, baseline_y),
+                text,
+                fontsize=fontsize,
+                fontname="helv",
+                render_mode=3,
+            )
 
 
 def _ensure_text(page: Any) -> None:

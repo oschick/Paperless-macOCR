@@ -155,3 +155,143 @@ def test_image_to_searchable_pdf():
     assert result[:5] == b"%PDF-"
     with pymupdf.open(stream=result, filetype="pdf") as doc:
         assert "Test" in doc[0].get_text()
+
+
+# ---- rotated / tilted text overlay tests ----
+
+
+def test_pdf_embed_text_layer_tilted_box(blank_pdf):
+    """A slightly tilted box with rect should produce searchable text."""
+    page_data = [
+        OcrPageData(
+            text="Tilted",
+            boxes=[
+                {
+                    "text": "Tilted",
+                    "x": 10,
+                    "y": 20,
+                    "w": 80,
+                    "h": 16,
+                    "rect": {
+                        "top_left_x": 10.0,
+                        "top_left_y": 20.0,
+                        "top_right_x": 90.0,
+                        "top_right_y": 28.0,
+                        "bottom_right_x": 88.0,
+                        "bottom_right_y": 44.0,
+                        "bottom_left_x": 8.0,
+                        "bottom_left_y": 36.0,
+                    },
+                },
+            ],
+            image_width=200.0,
+            image_height=200.0,
+        )
+    ]
+    result = pdf_embed_text_layer(blank_pdf, page_data)
+    assert pdf_has_text(result)
+    with pymupdf.open(stream=result, filetype="pdf") as doc:
+        assert "Tilted" in doc[0].get_text()
+
+
+def test_pdf_embed_text_layer_vertical_box(blank_pdf):
+    """A 90° rotated box (vertical text) should produce searchable text."""
+    page_data = [
+        OcrPageData(
+            text="Vert",
+            boxes=[
+                {
+                    "text": "Vert",
+                    "x": 10,
+                    "y": 10,
+                    "w": 14,
+                    "h": 80,
+                    "rect": {
+                        "top_left_x": 10.0,
+                        "top_left_y": 10.0,
+                        "top_right_x": 10.0,
+                        "top_right_y": 90.0,
+                        "bottom_right_x": 24.0,
+                        "bottom_right_y": 90.0,
+                        "bottom_left_x": 24.0,
+                        "bottom_left_y": 10.0,
+                    },
+                },
+            ],
+            image_width=200.0,
+            image_height=200.0,
+        )
+    ]
+    result = pdf_embed_text_layer(blank_pdf, page_data)
+    # Rotated text is embedded; extraction of rotated glyphs may be
+    # partial depending on the PDF renderer, but some text must appear.
+    assert pdf_has_text(result)
+
+
+def test_pdf_embed_text_layer_mixed_orientation(blank_pdf):
+    """Horizontal and rotated boxes together should both appear."""
+    page_data = [
+        OcrPageData(
+            text="Normal Rotated",
+            boxes=[
+                {"text": "Normal", "x": 10, "y": 20, "w": 60, "h": 14},
+                {
+                    "text": "Rotated",
+                    "x": 10,
+                    "y": 80,
+                    "w": 14,
+                    "h": 60,
+                    "rect": {
+                        "top_left_x": 10.0,
+                        "top_left_y": 80.0,
+                        "top_right_x": 10.0,
+                        "top_right_y": 140.0,
+                        "bottom_right_x": 24.0,
+                        "bottom_right_y": 140.0,
+                        "bottom_left_x": 24.0,
+                        "bottom_left_y": 80.0,
+                    },
+                },
+            ],
+            image_width=200.0,
+            image_height=200.0,
+        )
+    ]
+    result = pdf_embed_text_layer(blank_pdf, page_data)
+    with pymupdf.open(stream=result, filetype="pdf") as doc:
+        text = doc[0].get_text()
+        assert "Normal" in text
+        assert "Rotated" in text
+
+
+def test_pdf_embed_text_layer_rect_horizontal_no_morph(blank_pdf):
+    """Axis-aligned rect (angle ~0) should work without morph."""
+    page_data = [
+        OcrPageData(
+            text="Flat",
+            boxes=[
+                {
+                    "text": "Flat",
+                    "x": 10,
+                    "y": 20,
+                    "w": 60,
+                    "h": 14,
+                    "rect": {
+                        "top_left_x": 10.0,
+                        "top_left_y": 20.0,
+                        "top_right_x": 70.0,
+                        "top_right_y": 20.0,
+                        "bottom_right_x": 70.0,
+                        "bottom_right_y": 34.0,
+                        "bottom_left_x": 10.0,
+                        "bottom_left_y": 34.0,
+                    },
+                },
+            ],
+            image_width=200.0,
+            image_height=200.0,
+        )
+    ]
+    result = pdf_embed_text_layer(blank_pdf, page_data)
+    with pymupdf.open(stream=result, filetype="pdf") as doc:
+        assert "Flat" in doc[0].get_text()

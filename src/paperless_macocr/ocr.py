@@ -1,6 +1,7 @@
 """macOCR HTTP server client."""
 
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -27,6 +28,52 @@ _CLUSTER_GAP_CHARS = 4
 # independent columns (e.g. address left / date right in a letter) rather
 # than table columns.
 _COLUMN_GAP_CHARS = 15
+# Boxes whose text direction deviates more than this from horizontal are
+# classified as "vertical" and processed separately.
+_VERTICAL_ANGLE_THRESHOLD = 45.0
+
+
+def _get_rect_corners(
+    box: dict[str, Any],
+) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]] | None:
+    """Extract four corner coordinates from a box's ``rect`` field.
+
+    Handles both macOCR (snake_case) and iOS-OCR-Server (camelCase) naming.
+    Returns ``(top_left, top_right, bottom_right, bottom_left)`` as
+    ``(x, y)`` tuples, or ``None`` if rect data is missing.
+    """
+    rect = box.get("rect")
+    if not rect:
+        return None
+    tl_x = rect.get("top_left_x", rect.get("topLeft_x"))
+    tl_y = rect.get("top_left_y", rect.get("topLeft_y"))
+    tr_x = rect.get("top_right_x", rect.get("topRight_x"))
+    tr_y = rect.get("top_right_y", rect.get("topRight_y"))
+    br_x = rect.get("bottom_right_x", rect.get("bottomRight_x"))
+    br_y = rect.get("bottom_right_y", rect.get("bottomRight_y"))
+    bl_x = rect.get("bottom_left_x", rect.get("bottomLeft_x"))
+    bl_y = rect.get("bottom_left_y", rect.get("bottomLeft_y"))
+    if any(v is None for v in (tl_x, tl_y, tr_x, tr_y, br_x, br_y, bl_x, bl_y)):
+        return None
+    return (tl_x, tl_y), (tr_x, tr_y), (br_x, br_y), (bl_x, bl_y)
+
+
+def _box_angle_deg(box: dict[str, Any]) -> float:
+    """Return the rotation angle of a box's text direction in degrees.
+
+    Uses the ``rect`` field's top edge (top_left -> top_right).
+    0 = horizontal left-to-right, positive = clockwise in screen coords.
+    Returns 0.0 if ``rect`` is unavailable.
+    """
+    corners = _get_rect_corners(box)
+    if not corners:
+        return 0.0
+    tl, tr, _br, _bl = corners
+    dx = tr[0] - tl[0]
+    dy = tr[1] - tl[1]
+    if dx == 0 and dy == 0:
+        return 0.0
+    return math.degrees(math.atan2(dy, dx))
 
 
 def _avg_char_width(boxes: list[dict[str, Any]]) -> float:
@@ -123,6 +170,23 @@ def _reconstruct_text(data: dict[str, Any]) -> str:
     # Work on copies so the caller's data is not mutated
     boxes = [dict(b) for b in boxes]
 
+    # Separate vertical / heavily rotated boxes from horizontal ones.
+    horizontal: list[dict[str, Any]] = []
+    vertical: list[dict[str, Any]] = []
+    for b in boxes:
+        angle = abs(_box_angle_deg(b))
+        if _VERTICAL_ANGLE_THRESHOLD < angle < (180 - _VERTICAL_ANGLE_THRESHOLD):
+            vertical.append(b)
+        else:
+            horizontal.append(b)
+
+    if not horizontal:
+        # Everything is vertical/diagonal - emit in spatial order.
+        vertical.sort(key=lambda b: (b["x"], b["y"]))
+        return "\n".join(b["text"].strip() for b in vertical if b.get("text", "").strip())
+
+    boxes = horizontal
+
     # Strip left margin so text starts at column 0
     min_x = min(b["x"] for b in boxes)
     for b in boxes:
@@ -203,6 +267,15 @@ def _reconstruct_text(data: dict[str, Any]) -> str:
                 # Moderate gap -> table: align columns
                 rows = [[_cluster_text(c) for c in clusters] for clusters in run]
                 result.extend(_format_table(rows))
+
+    # Append vertical text at the end, separated by a blank line.
+    if vertical:
+        result.append("")
+        vertical.sort(key=lambda b: (b["x"], b["y"]))
+        for b in vertical:
+            text = b["text"].strip()
+            if text:
+                result.append(text)
 
     return "\n".join(result)
 
