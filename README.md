@@ -17,6 +17,7 @@ A webhook service that re-OCRs [Paperless-NGX](https://docs.paperless-ngx.com/) 
 3. Each page is rendered to a PNG image and sent to a **macOCR** or **iOS-OCR-Server** instance.
 4. The combined OCR text replaces the document's content in Paperless-NGX.
 5. *(Optional)* When `REPLACE_PDF=true`, the service builds a **searchable PDF** with an invisible text layer from the macOCR bounding boxes, uploads it to Paperless-NGX (preserving all metadata), and deletes the old document. This makes the Paperless PDF preview and text selection use the accurate macOCR results instead of the built-in OCR.
+6. *(Optional)* The built-in **Web UI** lets you browse documents, preview OCR results page-by-page, and approve them before writing back to Paperless.
 
 ## Prerequisites
 
@@ -161,6 +162,11 @@ paperless-macocr
 | `POST` | `/webhook` | Paperless-NGX webhook receiver |
 | `POST` | `/ocr/{document_id}` | Manually trigger OCR for one document |
 | `POST` | `/ocr/batch` | Trigger OCR for multiple documents |
+| `GET`  | `/ui` | Web UI — document browser *(when enabled)* |
+| `GET`  | `/ui/ocr/{id}` | Web UI — OCR preview for a document |
+| `POST` | `/ui/ocr/{id}/approve` | Web UI — approve & write OCR results |
+| `GET`  | `/ui/thumb/{id}` | Web UI — document thumbnail proxy |
+| `GET`  | `/ui/meta-options` | Web UI — JSON list of all tags, correspondents, document types |
 
 ### Batch OCR Example
 
@@ -188,7 +194,67 @@ All settings are configured via environment variables (or a `.env` file):
 | `SKIP_IF_TEXT_PRESENT` | `true` | Skip PDFs that already have text |
 | `REPLACE_PDF` | `false` | Upload a searchable PDF back to Paperless (see below) |
 
-## Searchable PDF Replacement
+## Web UI
+
+The service includes a built-in web interface for browsing your Paperless-NGX documents, running OCR interactively, previewing the results page-by-page, and approving them before writing back to Paperless.
+
+### Features
+
+- **Document browser** — paginated list with hover-zoom thumbnails, tag badges, search, and a text-status indicator (has text / no text)
+- **OCR preview** — run OCR on any document and see the recognised text side-by-side with the page image; switch between page-by-page, full-text, and compare (new vs existing) tabs
+- **Bounding-box overlay** — "Show Boxes" button draws every OCR text box on the page image as a semi-transparent polygon; hovering shows the recognised text for that box
+- **Metadata editing** — edit Title, Date created, Correspondent, Document type, and Tags directly on the preview page; autocomplete suggests existing Paperless values; entering a name that doesn't exist **creates it automatically**
+- **Approve / reject workflow** — only writes to Paperless after explicit approval; includes an optional **"Rebuild searchable PDF"** checkbox that re-runs OCR, builds a new PDF with an embedded invisible text layer, uploads it to Paperless (preserving all metadata), and deletes the original
+- **Tag filtering** — hide sensitive documents by excluding specific tag IDs
+- **Authentication** — none, HTTP basic auth, or OpenID Connect (Authentik, Keycloak, etc.)
+- **Responsive dark / light mode** — adapts to system preference
+
+### Enabling the Web UI
+
+The Web UI is enabled by default (`WEB_UI_ENABLED=true`). Visit `http://localhost:9000/ui` after starting the service.
+
+### Authentication modes
+
+Set `WEB_UI_AUTH` to one of:
+
+| Mode | Description |
+|------|-------------|
+| `none` | No authentication (default) |
+| `basic` | Username / password — set `WEB_UI_USERNAME` and `WEB_UI_PASSWORD` |
+| `oidc` | OpenID Connect — set the `OIDC_*` variables below (works with Authentik, Keycloak, etc.) |
+
+> API endpoints (`/webhook`, `/ocr/*`, `/health`) are never behind auth so webhooks and automation keep working.
+
+### Web UI Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WEB_UI_ENABLED` | `true` | Enable the web UI |
+| `WEB_UI_AUTH` | `none` | Auth mode: `none`, `basic`, or `oidc` |
+| `WEB_UI_USERNAME` | `admin` | Basic-auth username |
+| `WEB_UI_PASSWORD` | `""` | Basic-auth password |
+| `OIDC_CLIENT_ID` | `""` | OAuth2 / OIDC client ID |
+| `OIDC_CLIENT_SECRET` | `""` | OAuth2 / OIDC client secret |
+| `OIDC_DISCOVERY_URL` | `""` | OIDC discovery endpoint (`.well-known/openid-configuration`) |
+| `OIDC_REDIRECT_URI` | `""` | OAuth2 redirect URI (auto-detected if empty) |
+| `SESSION_SECRET` | `"change-me-in-production"` | Secret key for signing session cookies |
+| `WEB_UI_EXCLUDE_TAGS` | `""` | Comma-separated tag IDs to hide from the document list |
+
+### Rebuild Searchable PDF (Web UI)
+
+When the **"Also rebuild searchable PDF"** checkbox is ticked on the approve page, the service:
+
+1. Re-OCRs each page of the original document at the configured DPI
+2. Builds a new PDF with an invisible text layer positioned using macOCR's bounding boxes
+3. Uploads the searchable PDF to Paperless-NGX (copying all metadata from the original)
+4. Waits for Paperless to finish consuming the new document
+5. Deletes the original document
+
+This is the same behaviour as the automatic `REPLACE_PDF=true` webhook pipeline.
+
+> **Note:** Set `PAPERLESS_OCR_MODE=skip` in your Paperless-NGX config to prevent the re-uploaded PDF from being re-OCR'd by Paperless's built-in engine.
+
+## Searchable PDF Replacement (Automatic)
 
 When `REPLACE_PDF=true`, the service doesn't just update the text content — it also builds a new PDF with an **invisible text layer** positioned using the bounding boxes returned by macOCR. This searchable PDF is uploaded to Paperless-NGX as a new document (with all metadata copied), and the **original document is deleted**.
 
