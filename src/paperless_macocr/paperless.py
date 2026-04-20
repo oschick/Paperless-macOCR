@@ -112,3 +112,56 @@ class PaperlessClient:
         response = await self._client.delete(f"/api/documents/{document_id}/")
         response.raise_for_status()
         logger.info("Deleted document %d", document_id)
+
+    async def list_documents(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 25,
+        ordering: str = "-added",
+        search: str = "",
+        tags_id_all: list[int] | None = None,
+        tags_id_none: list[int] | None = None,
+    ) -> dict[str, Any]:
+        """List documents with optional filtering.
+
+        Returns the raw Paperless-NGX paginated response with
+        ``count``, ``next``, ``previous``, and ``results`` keys.
+        """
+        params: dict[str, Any] = {
+            "page": page,
+            "page_size": page_size,
+            "ordering": ordering,
+        }
+        if search:
+            params["query"] = search
+        if tags_id_all:
+            params["tags__id__all"] = ",".join(str(t) for t in tags_id_all)
+        if tags_id_none:
+            params["tags__id__none"] = ",".join(str(t) for t in tags_id_none)
+        response = await self._client.get("/api/documents/", params=params)
+        response.raise_for_status()
+        return response.json()
+
+    async def list_tags(self) -> list[dict[str, Any]]:
+        """Return all tags from Paperless-NGX."""
+        results: list[dict[str, Any]] = []
+        url = "/api/tags/?page_size=100"
+        while url:
+            response = await self._client.get(url)
+            response.raise_for_status()
+            data = response.json()
+            results.extend(data.get("results", []))
+            url = data.get("next", "")
+            if url:
+                # next is an absolute URL; strip the base to use relative
+                base = str(self._client.base_url).rstrip("/")
+                if url.startswith(base):
+                    url = url[len(base):]
+        return results
+
+    async def get_thumbnail(self, document_id: int) -> bytes:
+        """Download the thumbnail image for a document."""
+        response = await self._client.get(f"/api/documents/{document_id}/thumb/")
+        response.raise_for_status()
+        return response.content

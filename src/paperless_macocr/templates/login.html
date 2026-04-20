@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Login - Paperless macOCR{% endblock %}
+{% block content %}
+<div style="max-width: 400px; margin: 4rem auto;">
+  <div class="card">
+    <h2 class="mb-2">Sign in</h2>
+    {% if error %}
+      <div class="alert alert-danger mb-2">{{ error }}</div>
+    {% endif %}
+    <form method="post" action="/auth/login">
+      <input type="hidden" name="next" value="{{ next_url }}">
+      <div class="mb-1">
+        <label class="text-sm muted" for="username">Username</label>
+        <input type="text" id="username" name="username" required autofocus>
+      </div>
+      <div class="mb-2">
+        <label class="text-sm muted" for="password">Password</label>
+        <input type="password" id="password" name="password" required>
+      </div>
+      <button type="submit" class="btn btn-primary" style="width:100%">Login</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

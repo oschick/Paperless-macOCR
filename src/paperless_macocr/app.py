@@ -8,6 +8,7 @@ import re
 from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from paperless_macocr.config import Settings, get_settings
@@ -51,6 +52,17 @@ async def lifespan(_app: FastAPI):
     state.settings = settings
     state.paperless = PaperlessClient(settings)
     state.macocr = MacOCRClient(settings)
+
+    # Set up web UI if enabled
+    if settings.web_ui_enabled:
+        from paperless_macocr.auth import setup_auth
+        from paperless_macocr.web import register_web_ui
+        from paperless_macocr.web import router as web_router
+
+        signer, oauth = setup_auth(_app, settings)
+        register_web_ui(settings, state.paperless, state.macocr, signer, oauth)
+        _app.include_router(web_router)
+
     logger.info("Paperless-macOCR service started")
     yield
     await state.paperless.close()
@@ -297,6 +309,12 @@ async def _replace_with_searchable_pdf(
 @app.get("/health", response_model=HealthResponse)
 async def health() -> dict[str, str]:
     return {"status": "ok", "service": "paperless-macocr"}
+
+
+@app.get("/", include_in_schema=False)
+async def root():
+    """Redirect root to the web UI."""
+    return RedirectResponse("/ui")
 
 
 @app.post("/webhook", response_model=StatusResponse)

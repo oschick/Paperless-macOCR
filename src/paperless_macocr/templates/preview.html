@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}OCR Preview - {{ doc.title or "Document" }} - Paperless macOCR{% endblock %}
+{% block content %}
+
+<div class="flex flex-between items-center mb-2">
+  <div>
+    <a href="/ui" class="muted text-sm">← Back to documents</a>
+    <h1 class="mt-1">{{ doc.title or doc.original_file_name or "Untitled" }}</h1>
+    <div class="text-sm muted mt-1">
+      #{{ document_id }} &middot; {{ num_pages }} page{{ "s" if num_pages != 1 else "" }}
+      {% for tag in tag_names %}
+        <span class="badge">{{ tag }}</span>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+
+{% if has_existing %}
+  <div class="alert alert-success">
+    This document already has text content ({{ existing_text|length }} chars).
+    Approving will <strong>replace</strong> the existing text.
+  </div>
+{% endif %}
+
+<div class="mb-2">
+  <div class="flex gap-1">
+    <button class="btn btn-primary btn-sm" onclick="showTab('pages')">Page-by-Page</button>
+    <button class="btn btn-sm" style="border-color: var(--border);" onclick="showTab('full')">Full Text</button>
+    {% if has_existing %}
+      <button class="btn btn-sm" style="border-color: var(--border);" onclick="showTab('compare')">Compare</button>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Page-by-page view -->
+<div id="tab-pages">
+  {% for i in range(num_pages) %}
+    <div class="card mb-2">
+      <h3 class="mb-1">Page {{ i + 1 }}</h3>
+      <div class="preview-grid">
+        <div class="page-preview">
+          <img src="data:image/png;base64,{{ page_previews[i] }}" alt="Page {{ i + 1 }}">
+        </div>
+        <div>
+          <div class="text-sm muted mb-1">OCR Text ({{ page_texts[i]|length }} chars)</div>
+          <div class="page-text">{{ page_texts[i] or "(no text detected)" }}</div>
+        </div>
+      </div>
+    </div>
+  {% endfor %}
+</div>
+
+<!-- Full text view -->
+<div id="tab-full" class="hidden">
+  <div class="card">
+    <h3 class="mb-1">Combined OCR Text</h3>
+    <div class="page-text" style="max-height: 600px;">{{ combined_text }}</div>
+  </div>
+</div>
+
+<!-- Compare view -->
+{% if has_existing %}
+<div id="tab-compare" class="hidden">
+  <div class="preview-grid">
+    <div class="card">
+      <h3 class="mb-1">Existing Text</h3>
+      <div class="page-text" style="max-height: 600px;">{{ existing_text }}</div>
+    </div>
+    <div class="card">
+      <h3 class="mb-1">New OCR Text</h3>
+      <div class="page-text" style="max-height: 600px;">{{ combined_text }}</div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<!-- Approve form -->
+<div class="card mt-2" style="border-color: var(--success);">
+  <h3 class="mb-1">Approve & Apply OCR</h3>
+  <form method="post" action="/ui/ocr/{{ document_id }}/approve">
+    <textarea name="combined_text" rows="6" class="mb-1"
+              style="font-family: monospace; font-size: 0.85rem;">{{ combined_text }}</textarea>
+    <div class="flex items-center gap-2 mt-1">
+      <label class="flex items-center gap-1 text-sm">
+        <input type="checkbox" name="replace_pdf" {% if is_pdf %}checked{% endif %}>
+        Also rebuild searchable PDF
+      </label>
+    </div>
+    <div class="flex gap-1 mt-2">
+      <button type="submit" class="btn btn-success">Approve & Apply</button>
+      <a href="/ui" class="btn" style="border-color: var(--border);">Cancel</a>
+    </div>
+  </form>
+</div>
+
+<script>
+function showTab(tab) {
+  document.querySelectorAll('[id^="tab-"]').forEach(el => el.classList.add('hidden'));
+  document.getElementById('tab-' + tab).classList.remove('hidden');
+}
+</script>
+{% endblock %}

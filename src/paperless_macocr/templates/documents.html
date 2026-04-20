@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Documents - Paperless macOCR{% endblock %}
+{% block content %}
+
+{% if request.query_params.get('approved') %}
+  <div class="alert alert-success">OCR approved and applied to document #{{ request.query_params.get('approved') }}.</div>
+{% endif %}
+
+<div class="flex flex-between items-center mb-2">
+  <h1>Documents</h1>
+  <span class="muted text-sm">{{ total }} document{{ "s" if total != 1 else "" }}</span>
+</div>
+
+<form method="get" action="/ui" class="flex gap-1 mb-2">
+  <input type="text" name="search" value="{{ search }}" placeholder="Search documents…"
+         style="max-width: 400px;">
+  <button type="submit" class="btn btn-primary">Search</button>
+  {% if search %}
+    <a href="/ui" class="btn" style="border-color: var(--border);">Clear</a>
+  {% endif %}
+</form>
+
+{% if exclude_tags %}
+  <p class="text-sm muted mb-2">
+    Excluding tags: {% for t in exclude_tags %}<span class="badge">{{ t }}</span>{% endfor %}
+  </p>
+{% endif %}
+
+<div class="card">
+  {% for doc in documents %}
+    <div class="doc-row">
+      <img src="/ui/thumb/{{ doc.id }}" class="thumb" alt="Thumbnail" loading="lazy">
+      <div class="doc-info">
+        <div class="doc-title">
+          <span class="status-dot {{ 'status-has-text' if doc.has_content else 'status-no-text' }}"
+                title="{{ 'Has text content' if doc.has_content else 'No text content' }}"></span>
+          {{ doc.title or doc.original_file_name or "Untitled" }}
+        </div>
+        <div class="text-sm muted">
+          #{{ doc.id }} &middot; {{ doc.added[:10] if doc.added else "" }} &middot;
+          {{ doc.correspondent__name if doc.correspondent__name else "" }}
+        </div>
+        <div class="mt-1">
+          {% for tag in doc.tag_names %}
+            <span class="badge">{{ tag }}</span>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="doc-actions">
+        <a href="{{ doc.paperless_link }}" target="_blank" class="btn btn-sm"
+           style="border-color: var(--border);" title="Open in Paperless">↗</a>
+        <a href="/ui/ocr/{{ doc.id }}" class="btn btn-sm btn-primary">OCR</a>
+      </div>
+    </div>
+  {% empty %}
+    <p class="muted" style="padding: 2rem; text-align: center;">No documents found.</p>
+  {% endfor %}
+</div>
+
+{% if total_pages > 1 %}
+  <div class="pagination">
+    {% if page > 1 %}
+      <a href="/ui?page={{ page - 1 }}&search={{ search }}">← Prev</a>
+    {% endif %}
+    {% for p in range(1, total_pages + 1) %}
+      {% if p == page %}
+        <span class="active">{{ p }}</span>
+      {% elif p <= 3 or p >= total_pages - 2 or (p >= page - 2 and p <= page + 2) %}
+        <a href="/ui?page={{ p }}&search={{ search }}">{{ p }}</a>
+      {% elif p == 4 or p == total_pages - 3 %}
+        <span class="muted">…</span>
+      {% endif %}
+    {% endfor %}
+    {% if page < total_pages %}
+      <a href="/ui?page={{ page + 1 }}&search={{ search }}">Next →</a>
+    {% endif %}
+  </div>
+{% endif %}
+
+{% endblock %}
