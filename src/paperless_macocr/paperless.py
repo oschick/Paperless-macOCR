@@ -157,7 +157,7 @@ class PaperlessClient:
                 # next is an absolute URL; strip the base to use relative
                 base = str(self._client.base_url).rstrip("/")
                 if url.startswith(base):
-                    url = url[len(base):]
+                    url = url[len(base) :]
         return results
 
     async def get_thumbnail(self, document_id: int) -> bytes:

@@ -94,9 +94,7 @@ async def login_page(request: Request, next: str = "/ui"):
     if _settings.web_ui_auth == "oidc" and _oauth is not None:  # type: ignore[union-attr]
         redirect_uri = _settings.oidc_redirect_uri or str(request.url_for("oidc_callback"))  # type: ignore[union-attr]
         return await _oauth.oidc.authorize_redirect(request, redirect_uri, state=next)
-    return templates.TemplateResponse(
-        request, "login.html", {"next_url": next}
-    )
+    return templates.TemplateResponse(request, "login.html", {"next_url": next})
 
 
 @router.post("/auth/login")
@@ -108,7 +106,10 @@ async def login_submit(
 ):
     _require("_settings", "_signer")
     if not verify_basic(
-        username, password, _settings.web_ui_username, _settings.web_ui_password  # type: ignore[union-attr]
+        username,
+        password,
+        _settings.web_ui_username,
+        _settings.web_ui_password,  # type: ignore[union-attr]
     ):
         return templates.TemplateResponse(
             request,
@@ -118,9 +119,7 @@ async def login_submit(
         )
     token = _signer.sign({"user": username})  # type: ignore[union-attr]
     response = RedirectResponse(next, status_code=303)
-    response.set_cookie(
-        _SESSION_COOKIE, token, max_age=_SESSION_MAX_AGE, httponly=True, samesite="lax"
-    )
+    response.set_cookie(_SESSION_COOKIE, token, max_age=_SESSION_MAX_AGE, httponly=True, samesite="lax")
     return response
 
 
@@ -133,9 +132,7 @@ async def oidc_callback(request: Request):
     session_token = _signer.sign({"user": user})  # type: ignore[union-attr]
     next_url = request.query_params.get("state", "/ui")
     response = RedirectResponse(next_url, status_code=303)
-    response.set_cookie(
-        _SESSION_COOKIE, session_token, max_age=_SESSION_MAX_AGE, httponly=True, samesite="lax"
-    )
+    response.set_cookie(_SESSION_COOKIE, session_token, max_age=_SESSION_MAX_AGE, httponly=True, samesite="lax")
     return response
 
 
@@ -210,7 +207,8 @@ async def ocr_preview(request: Request, document_id: int):
         for page_idx in range(num_pages):
             png_bytes = pdf_page_to_png(file_bytes, page_idx, dpi=_settings.ocr_dpi)  # type: ignore[union-attr]
             result = await _macocr.ocr_image(  # type: ignore[union-attr]
-                png_bytes, filename=f"page_{page_idx + 1:04d}.png")
+                png_bytes, filename=f"page_{page_idx + 1:04d}.png"
+            )
             page_results.append(result)
             # Low-res preview
             preview_png = pdf_page_to_png(file_bytes, page_idx, dpi=100)
@@ -275,7 +273,8 @@ async def ocr_approve(request: Request, document_id: int):
             for page_idx in range(num_pages):
                 png_bytes = pdf_page_to_png(file_bytes, page_idx, dpi=_settings.ocr_dpi)  # type: ignore[union-attr]
                 result = await _macocr.ocr_image(  # type: ignore[union-attr]
-                    png_bytes, filename=f"page_{page_idx + 1:04d}.png")
+                    png_bytes, filename=f"page_{page_idx + 1:04d}.png"
+                )
                 page_results.append(result)
             _searchable = pdf_embed_text_layer(file_bytes, page_results)
             logger.info("Web UI: built searchable PDF for document %d", document_id)
