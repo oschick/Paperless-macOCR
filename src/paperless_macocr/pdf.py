@@ -54,6 +54,35 @@ def pdf_page_to_png(pdf_bytes: bytes, page_number: int, dpi: int = 300) -> bytes
         return pixmap.tobytes(output="png")
 
 
+def _page_tilt_deg(boxes: list[dict[str, Any]]) -> float:
+    """Estimate the median text rotation angle across all boxes on a page.
+
+    Only horizontal-ish boxes with a measured non-zero angle are used.
+    Returns 0.0 when there are fewer than 3 measured samples.
+    """
+    angles: list[float] = []
+    for box in boxes:
+        corners = _get_rect_corners(box)
+        if not corners:
+            continue
+        tl, tr, _br, _bl = corners
+        dx = tr[0] - tl[0]
+        dy = tr[1] - tl[1]
+        angle = math.degrees(math.atan2(dy, dx))
+        if abs(angle) < 45 and abs(angle) > 0.05:
+            angles.append(angle)
+    if len(angles) < 3:
+        return 0.0
+    angles.sort()
+    return angles[len(angles) // 2]
+
+
+# Helvetica font metrics from pymupdf (units per fontsize point).
+_ASCENDER = 1.075
+_DESCENDER = 0.299
+_VIS_HEIGHT = _ASCENDER + _DESCENDER  # ≈ 1.374
+
+
 def _overlay_boxes(
     page: Any,
     boxes: list[dict[str, Any]],
@@ -76,6 +105,10 @@ def _overlay_boxes(
     # Pre-load the font so we can measure text widths
     font = pymupdf.Font("helv")
 
+    # Detect overall page tilt so we can apply it to boxes where the OCR
+    # returned axis-aligned rect corners on a crooked scan.
+    page_tilt = _page_tilt_deg(boxes)
+
     for box in boxes:
         text = box.get("text", "").strip()
         if not text:
@@ -93,6 +126,11 @@ def _overlay_boxes(
             dy = tr_pdf[1] - tl_pdf[1]
             angle_deg = math.degrees(math.atan2(dy, dx))
 
+            # If the OCR reported an axis-aligned box on a tilted page,
+            # use the page-level tilt instead.
+            if abs(angle_deg) < 0.05 and abs(page_tilt) > 0.05:
+                angle_deg = page_tilt
+
             text_w = math.sqrt(dx * dx + dy * dy)
             perp_dx = bl_pdf[0] - tl_pdf[0]
             perp_dy = bl_pdf[1] - tl_pdf[1]
@@ -105,30 +143,24 @@ def _overlay_boxes(
             fontsize = min(text_w / unit_width, text_h) if unit_width > 0 else text_h
             fontsize = max(fontsize, 1.0)
 
-            # Baseline: start at TL, move along TL→BL by (h - descender)
-            baseline_frac = (text_h - fontsize * 0.2) / text_h if text_h > 0 else 0.8
-            bx = tl_pdf[0] + perp_dx * baseline_frac
-            by = tl_pdf[1] + perp_dy * baseline_frac
-
-            insert_pt = pymupdf.Point(bx, by)
-
-            if abs(angle_deg) > 0.5:
-                page.insert_text(
-                    insert_pt,
-                    text,
-                    fontsize=fontsize,
-                    fontname="helv",
-                    render_mode=3,  # invisible
-                    morph=(insert_pt, pymupdf.Matrix(angle_deg)),
-                )
+            pivot = pymupdf.Point(tl_pdf[0], tl_pdf[1])
+            if fontsize < text_h * 0.9:
+                # Width-limited: centre the smaller glyphs vertically.
+                vis_h = fontsize * _VIS_HEIGHT
+                top_margin = (text_h - vis_h) / 2
+                baseline_y = tl_pdf[1] + top_margin + fontsize * _ASCENDER
             else:
-                page.insert_text(
-                    insert_pt,
-                    text,
-                    fontsize=fontsize,
-                    fontname="helv",
-                    render_mode=3,
-                )
+                # Height-limited: standard baseline fraction.
+                baseline_y = tl_pdf[1] + text_h * _ASCENDER / _VIS_HEIGHT
+
+            page.insert_text(
+                pymupdf.Point(tl_pdf[0], baseline_y),
+                text,
+                fontsize=fontsize,
+                fontname="helv",
+                render_mode=3,  # invisible
+                morph=(pivot, pymupdf.Matrix(-angle_deg)),
+            )
         else:
             # Fallback: axis-aligned placement from x/y/w/h
             x = box["x"] * scale_x
@@ -142,7 +174,12 @@ def _overlay_boxes(
             fontsize = min(w / unit_width, h) if unit_width > 0 else h
             fontsize = max(fontsize, 1.0)
 
-            baseline_y = y + h - fontsize * 0.2
+            if fontsize < h * 0.9:
+                vis_h = fontsize * _VIS_HEIGHT
+                top_margin = (h - vis_h) / 2
+                baseline_y = y + top_margin + fontsize * _ASCENDER
+            else:
+                baseline_y = y + h * _ASCENDER / _VIS_HEIGHT
             page.insert_text(
                 pymupdf.Point(x, baseline_y),
                 text,
