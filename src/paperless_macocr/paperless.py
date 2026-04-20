@@ -190,6 +190,30 @@ class PaperlessClient:
         """Return all document types (id, name)."""
         return await self._list_all("/api/document_types/")
 
+    async def create_correspondent(self, name: str) -> dict[str, Any]:
+        """Create a new correspondent and return the created object."""
+        response = await self._client.post("/api/correspondents/", json={"name": name})
+        response.raise_for_status()
+        result: dict[str, Any] = response.json()
+        logger.info("Created correspondent %r (id %d)", name, result["id"])
+        return result
+
+    async def create_document_type(self, name: str) -> dict[str, Any]:
+        """Create a new document type and return the created object."""
+        response = await self._client.post("/api/document_types/", json={"name": name})
+        response.raise_for_status()
+        result: dict[str, Any] = response.json()
+        logger.info("Created document type %r (id %d)", name, result["id"])
+        return result
+
+    async def create_tag(self, name: str) -> dict[str, Any]:
+        """Create a new tag and return the created object."""
+        response = await self._client.post("/api/tags/", json={"name": name})
+        response.raise_for_status()
+        result: dict[str, Any] = response.json()
+        logger.info("Created tag %r (id %d)", name, result["id"])
+        return result
+
     async def update_document_metadata(
         self,
         document_id: int,

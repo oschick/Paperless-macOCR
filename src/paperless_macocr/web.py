@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 from pathlib import Path
@@ -262,11 +263,10 @@ async def ocr_approve(request: Request, document_id: int):
     if not combined_text.strip():
         raise HTTPException(status_code=422, detail="No text to approve")
 
-    # ── Resolve metadata fields ──────────────────────────────────────
+    # ── Resolve (and auto-create) metadata fields ─────────────────────
     title = str(form.get("title", "")).strip() or None
     created = str(form.get("created", "")).strip() or None
 
-    # Correspondent / document type: form sends the name; resolve to ID
     correspondents, doc_types, all_tags = await _gather_meta_options()
     corr_name = str(form.get("correspondent", "")).strip()
     dtype_name = str(form.get("document_type", "")).strip()
@@ -275,19 +275,33 @@ async def ocr_approve(request: Request, document_id: int):
     corr_id: int | None = None
     if corr_name:
         match = next((c for c in correspondents if c["name"] == corr_name), None)
-        corr_id = match["id"] if match else None
+        if match:
+            corr_id = match["id"]
+        else:
+            created_corr = await _paperless.create_correspondent(corr_name)  # type: ignore[union-attr]
+            corr_id = created_corr["id"]
 
     dtype_id: int | None = None
     if dtype_name:
         match = next((d for d in doc_types if d["name"] == dtype_name), None)
-        dtype_id = match["id"] if match else None
+        if match:
+            dtype_id = match["id"]
+        else:
+            created_dt = await _paperless.create_document_type(dtype_name)  # type: ignore[union-attr]
+            dtype_id = created_dt["id"]
 
     tag_ids: list[int] | None = None
     if tag_names_raw:
         name_to_id = {t["name"]: t["id"] for t in all_tags}
-        tag_ids = [name_to_id[n.strip()] for n in tag_names_raw.split(",") if n.strip() in name_to_id]
+        tag_ids = []
+        for name in (n.strip() for n in tag_names_raw.split(",") if n.strip()):
+            if name in name_to_id:
+                tag_ids.append(name_to_id[name])
+            else:
+                new_tag = await _paperless.create_tag(name)  # type: ignore[union-attr]
+                tag_ids.append(new_tag["id"])
 
-    # ── Patch document (single PATCH with all changed fields) ────────
+    # ── Patch document ────────────────────────────────────────────────
     await _paperless.update_document_metadata(  # type: ignore[union-attr]
         document_id,
         title=title,
@@ -299,28 +313,84 @@ async def ocr_approve(request: Request, document_id: int):
     )
     logger.info("Web UI: approved OCR + metadata for document %d", document_id)
 
-    # Optionally rebuild the PDF with embedded text layer
+    # ── Optionally rebuild searchable PDF and re-upload ───────────────
     if build_pdf:
-        doc_meta = await _paperless.get_document(document_id)  # type: ignore[union-attr]
-        file_bytes = await _paperless.download_document(document_id, original=True)  # type: ignore[union-attr]
-        mime = doc_meta.get("mime_type", "")
-
-        if mime == "application/pdf":
-            page_results: list[OcrPageData] = []
-            num_pages = pdf_page_count(file_bytes)
-            for page_idx in range(num_pages):
-                png_bytes = pdf_page_to_png(file_bytes, page_idx, dpi=_settings.ocr_dpi)  # type: ignore[union-attr]
-                result = await _macocr.ocr_image(  # type: ignore[union-attr]
-                    png_bytes, filename=f"page_{page_idx + 1:04d}.png"
-                )
-                page_results.append(result)
-            _searchable = pdf_embed_text_layer(file_bytes, page_results)
-            logger.info("Web UI: built searchable PDF for document %d", document_id)
-            # Note: full PDF replacement (upload + delete old) would need the same
-            # logic as _replace_with_searchable_pdf in app.py.  For now we just
-            # update the content text which is the most common use case.
+        await _rebuild_and_replace_pdf(document_id, combined_text)
 
     return RedirectResponse(f"/ui?approved={document_id}", status_code=303)
+
+
+_TASK_POLL_INTERVAL = 2  # seconds
+_TASK_POLL_MAX = 60  # max attempts
+
+
+async def _rebuild_and_replace_pdf(document_id: int, combined_text: str) -> None:
+    """Build a searchable PDF and upload it to Paperless, replacing the original.
+
+    Mirrors _replace_with_searchable_pdf in app.py but operates on the
+    web-UI module-level paperless/macocr/settings singletons.
+    """
+    # Lazy import to avoid circular dependency at module level
+    from paperless_macocr.app import _replacing_titles
+
+    doc_meta = await _paperless.get_document(document_id)  # type: ignore[union-attr]
+    mime = doc_meta.get("mime_type", "")
+    if mime != "application/pdf":
+        logger.warning("Web UI: rebuild_pdf skipped — document %d is not a PDF (%s)", document_id, mime)
+        return
+
+    file_bytes = await _paperless.download_document(document_id, original=True)  # type: ignore[union-attr]
+    num_pages = pdf_page_count(file_bytes)
+    page_results: list[OcrPageData] = []
+    for page_idx in range(num_pages):
+        png_bytes = pdf_page_to_png(file_bytes, page_idx, dpi=_settings.ocr_dpi)  # type: ignore[union-attr]
+        result = await _macocr.ocr_image(  # type: ignore[union-attr]
+            png_bytes, filename=f"page_{page_idx + 1:04d}.png"
+        )
+        page_results.append(result)
+
+    searchable_pdf = pdf_embed_text_layer(file_bytes, page_results)
+    logger.info("Web UI: built searchable PDF for document %d (%d bytes)", document_id, len(searchable_pdf))
+
+    title = doc_meta.get("title") or f"doc-{document_id}"
+    _replacing_titles.add(title)
+    try:
+        task_uuid = await _paperless.upload_document(  # type: ignore[union-attr]
+            searchable_pdf,
+            f"{title}.pdf",
+            title=title,
+            correspondent=doc_meta.get("correspondent"),
+            document_type=doc_meta.get("document_type"),
+            storage_path=doc_meta.get("storage_path"),
+            tags=doc_meta.get("tags"),
+            archive_serial_number=doc_meta.get("archive_serial_number"),
+        )
+
+        new_doc_id = None
+        for _ in range(_TASK_POLL_MAX):
+            await asyncio.sleep(_TASK_POLL_INTERVAL)
+            task = await _paperless.get_task(task_uuid)  # type: ignore[union-attr]
+            status = task.get("status", "")
+            if status == "SUCCESS":
+                new_doc_id = task.get("related_document")
+                break
+            if status == "FAILURE":
+                logger.error(
+                    "Web UI: consumption failed for document %d: %s",
+                    document_id,
+                    task.get("result", "unknown error"),
+                )
+                return
+
+        if new_doc_id is None:
+            logger.error("Web UI: consumption timed out for document %d (task %s)", document_id, task_uuid)
+            return
+
+        await _paperless.update_document_content(int(new_doc_id), combined_text)  # type: ignore[union-attr]
+        await _paperless.delete_document(document_id)  # type: ignore[union-attr]
+        logger.info("Web UI: replaced document %d with searchable PDF (new id: %d)", document_id, new_doc_id)
+    finally:
+        _replacing_titles.discard(title)
 
 
 # ─── Thumbnail proxy ────────────────────────────────────────────────
