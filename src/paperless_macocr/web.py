@@ -387,6 +387,12 @@ async def _rebuild_and_replace_pdf(document_id: int, combined_text: str) -> None
             return
 
         await _paperless.update_document_content(int(new_doc_id), combined_text)  # type: ignore[union-attr]
+
+        # Remove inbox / auto-added tags from the new document
+        remove_entries = _settings.get_replace_pdf_remove_tags()  # type: ignore[union-attr]
+        if remove_entries:
+            await _paperless.remove_tags_from_document(int(new_doc_id), remove_entries)  # type: ignore[union-attr]
+
         await _paperless.delete_document(document_id)  # type: ignore[union-attr]
         logger.info("Web UI: replaced document %d with searchable PDF (new id: %d)", document_id, new_doc_id)
     finally:

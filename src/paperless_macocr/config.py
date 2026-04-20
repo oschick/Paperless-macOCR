@@ -57,11 +57,22 @@ class Settings(BaseSettings):
     # Tag IDs to exclude from the web UI document list (comma-separated)
     web_ui_exclude_tags: str = ""
 
+    # Tag names or IDs to remove from a document after its searchable PDF is
+    # uploaded (e.g. "Inbox" or "1,2").  Applies to both the automatic
+    # REPLACE_PDF pipeline and the Web UI "rebuild PDF" checkbox.
+    replace_pdf_remove_tags: str = "Neu"
+
     def get_exclude_tag_ids(self) -> list[int]:
         """Parse the comma-separated exclude tag IDs into a list."""
         if not self.web_ui_exclude_tags:
             return []
         return [int(t.strip()) for t in self.web_ui_exclude_tags.split(",") if t.strip().isdigit()]
+
+    def get_replace_pdf_remove_tags(self) -> list[str]:
+        """Return raw entries (names or numeric IDs) to remove after PDF replace."""
+        if not self.replace_pdf_remove_tags:
+            return []
+        return [t.strip() for t in self.replace_pdf_remove_tags.split(",") if t.strip()]
 
 
 def get_settings() -> Settings:

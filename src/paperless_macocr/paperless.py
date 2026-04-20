@@ -249,3 +249,47 @@ class PaperlessClient:
         result: dict[str, Any] = response.json()
         logger.info("Updated metadata for document %d: %s", document_id, list(payload))
         return result
+
+    async def remove_tags_from_document(
+        self,
+        document_id: int,
+        remove_entries: list[str],
+    ) -> None:
+        """Remove specific tags from a document.
+
+        *remove_entries* is a list of tag names or numeric ID strings
+        (as returned by ``Settings.get_replace_pdf_remove_tags()``).
+        Tags not present on the document are silently ignored.
+        """
+        if not remove_entries:
+            return
+
+        # Resolve entries to IDs
+        all_tags = await self.list_tags()
+        name_to_id = {t["name"]: t["id"] for t in all_tags}
+        remove_ids: set[int] = set()
+        for entry in remove_entries:
+            if entry.isdigit():
+                remove_ids.add(int(entry))
+            elif entry in name_to_id:
+                remove_ids.add(name_to_id[entry])
+            else:
+                logger.warning("remove_tags_from_document: tag %r not found, skipping", entry)
+
+        if not remove_ids:
+            return
+
+        doc = await self.get_document(document_id)
+        current_tags: list[int] = doc.get("tags", [])
+        new_tags = [t for t in current_tags if t not in remove_ids]
+
+        if new_tags == current_tags:
+            return  # nothing to change
+
+        response = await self._client.patch(
+            f"/api/documents/{document_id}/",
+            json={"tags": new_tags},
+        )
+        response.raise_for_status()
+        removed = [t for t in current_tags if t in remove_ids]
+        logger.info("Removed tags %s from document %d", removed, document_id)

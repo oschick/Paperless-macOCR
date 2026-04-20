@@ -193,6 +193,7 @@ All settings are configured via environment variables (or a `.env` file):
 | `OCR_DPI` | `300` | PDF-to-image rendering DPI |
 | `SKIP_IF_TEXT_PRESENT` | `true` | Skip PDFs that already have text |
 | `REPLACE_PDF` | `false` | Upload a searchable PDF back to Paperless (see below) |
+| `REPLACE_PDF_REMOVE_TAGS` | `""` | Comma-separated tag names **or** IDs to strip from the new document after **Web UI** PDF replacement (e.g. `Inbox` or `1,5`). Not applied on automatic webhook rebuilds — use this to signal a document has been fully reviewed. |
 
 ## Web UI
 
@@ -248,7 +249,10 @@ When the **"Also rebuild searchable PDF"** checkbox is ticked on the approve pag
 2. Builds a new PDF with an invisible text layer positioned using macOCR's bounding boxes
 3. Uploads the searchable PDF to Paperless-NGX (copying all metadata from the original)
 4. Waits for Paperless to finish consuming the new document
-5. Deletes the original document
+5. Strips any tags listed in `REPLACE_PDF_REMOVE_TAGS` (e.g. `Inbox`) from the new document — signalling it has been fully reviewed
+6. Deletes the original document
+
+> **Note:** Tag removal only happens via the Web UI approve flow, not the automatic `REPLACE_PDF=true` webhook pipeline. This lets you use the presence of the inbox tag as a "not yet manually reviewed" indicator.
 
 This is the same behaviour as the automatic `REPLACE_PDF=true` webhook pipeline.
 
@@ -264,6 +268,7 @@ When `REPLACE_PDF=true`, the service doesn't just update the text content — it
 
 - Set `PAPERLESS_OCR_MODE=skip` in your Paperless-NGX configuration so the re-uploaded PDF is not re-OCR'd by Paperless's built-in engine.
 - The service automatically prevents infinite webhook loops — it tracks documents it just uploaded and skips them when the webhook fires for the newly consumed document.
+- Set `REPLACE_PDF_REMOVE_TAGS=Inbox` (or a comma-separated list of tag names/IDs) to automatically remove tags from the replacement document **when approved via the Web UI**. The automatic webhook pipeline deliberately does not strip tags, so the inbox tag remains as a "pending manual review" indicator.
 
 ## Architecture Notes
 
