@@ -97,6 +97,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
 def setup_auth(app: FastAPI, settings: Settings) -> tuple[_Signer, OAuth | None]:
     """Configure authentication middleware and return helpers."""
+    from starlette.middleware.sessions import SessionMiddleware
+
     signer = _Signer(settings.session_secret)
     oauth: OAuth | None = None
 
@@ -104,6 +106,9 @@ def setup_auth(app: FastAPI, settings: Settings) -> tuple[_Signer, OAuth | None]
         app.add_middleware(AuthMiddleware, settings=settings, signer=signer)
 
     if settings.web_ui_auth == "oidc" and settings.oidc_discovery_url:
+        # SessionMiddleware is required by authlib to store OIDC state/nonce
+        # between the redirect and callback.
+        app.add_middleware(SessionMiddleware, secret_key=settings.session_secret)
         oauth = OAuth()
         oauth.register(
             name="oidc",
