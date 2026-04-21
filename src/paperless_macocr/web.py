@@ -148,9 +148,7 @@ async def logout():
 
 
 @router.get("/ui", response_class=HTMLResponse)
-async def document_list(
-    request: Request, page: int = 1, search: str = "", tag: str = ""
-):
+async def document_list(request: Request, page: int = 1, search: str = "", tag: str = ""):
     _require("_settings", "_paperless")
     exclude_tags = _settings.get_exclude_tag_ids()  # type: ignore[union-attr]
     tag_map = await _get_tag_map()
@@ -338,9 +336,7 @@ async def ocr_approve(request: Request, document_id: int):
         await _rebuild_and_replace_pdf(document_id, combined_text, tag_ids)
 
     # Return JSON for async fetch, redirect for plain form posts
-    is_ajax = "x-requested-with" in request.headers or request.headers.get("accept", "").startswith(
-        "application/json"
-    )
+    is_ajax = "x-requested-with" in request.headers or request.headers.get("accept", "").startswith("application/json")
     if is_ajax:
         return JSONResponse({"ok": True, "document_id": document_id})
     return RedirectResponse(f"/ui?approved={document_id}", status_code=303)
