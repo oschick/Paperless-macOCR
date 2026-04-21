@@ -30,6 +30,11 @@ logger = logging.getLogger(__name__)
 # webhook for the new document fires.
 _replacing_titles: set[str] = set()
 
+# Signer and OAuth client for the web UI - populated at module level so they
+# are available before the app starts (middleware registration requirement).
+_web_signer = None
+_web_oauth = None
+
 
 # ---------------------------------------------------------------------------
 # Shared state populated during lifespan
@@ -55,13 +60,9 @@ async def lifespan(_app: FastAPI):
 
     # Set up web UI if enabled
     if settings.web_ui_enabled:
-        from paperless_macocr.auth import setup_auth
         from paperless_macocr.web import register_web_ui
-        from paperless_macocr.web import router as web_router
 
-        signer, oauth = setup_auth(_app, settings)
-        register_web_ui(settings, state.paperless, state.macocr, signer, oauth)
-        _app.include_router(web_router)
+        register_web_ui(settings, state.paperless, state.macocr, _web_signer, _web_oauth)
 
     logger.info("Paperless-macOCR service started")
     yield
@@ -76,6 +77,23 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# ---------------------------------------------------------------------------
+# Web UI — middleware and router must be registered BEFORE the app starts.
+# (Starlette raises RuntimeError if add_middleware is called post-startup.)
+# Wrapped in try/except so the module can be imported in test environments
+# where the required env vars are not set.
+# ---------------------------------------------------------------------------
+try:
+    _boot_settings = get_settings()
+    if _boot_settings.web_ui_enabled:
+        from paperless_macocr.auth import setup_auth
+        from paperless_macocr.web import router as web_router
+
+        _web_signer, _web_oauth = setup_auth(app, _boot_settings)
+        app.include_router(web_router)
+except Exception:  # noqa: S110
+    pass  # env vars absent (e.g. test environment) — lifespan will validate
 
 
 # ---------------------------------------------------------------------------

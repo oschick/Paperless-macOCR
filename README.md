@@ -226,6 +226,52 @@ Set `WEB_UI_AUTH` to one of:
 
 > API endpoints (`/webhook`, `/ocr/*`, `/health`) are never behind auth so webhooks and automation keep working.
 
+#### Basic auth setup
+
+```env
+WEB_UI_AUTH=basic
+WEB_UI_USERNAME=admin
+WEB_UI_PASSWORD=a-strong-password
+SESSION_SECRET=a-random-secret-string
+```
+
+#### OIDC setup (Authentik)
+
+1. In Authentik, create a new **OAuth2/OpenID Provider**:
+   - **Client type**: Confidential
+   - **Redirect URIs**: `http(s)://<your-host>:9000/auth/callback`
+   - Note the **Client ID** and **Client Secret**
+2. Create an **Application** bound to that provider.
+3. Configure the service:
+
+```env
+WEB_UI_AUTH=oidc
+OIDC_CLIENT_ID=<client-id-from-authentik>
+OIDC_CLIENT_SECRET=<client-secret-from-authentik>
+OIDC_DISCOVERY_URL=https://<authentik-host>/application/o/<app-slug>/.well-known/openid-configuration
+# Optional – auto-detected from the incoming request if left empty:
+OIDC_REDIRECT_URI=https://<your-host>:9000/auth/callback
+SESSION_SECRET=a-random-secret-string
+```
+
+#### OIDC setup (Keycloak)
+
+1. In your Keycloak realm, create a new **Client**:
+   - **Client authentication**: On (confidential)
+   - **Valid redirect URIs**: `http(s)://<your-host>:9000/auth/callback`
+   - Note the **Client ID** and the secret from the **Credentials** tab
+2. Configure the service:
+
+```env
+WEB_UI_AUTH=oidc
+OIDC_CLIENT_ID=paperless-macocr
+OIDC_CLIENT_SECRET=<client-secret>
+OIDC_DISCOVERY_URL=https://<keycloak-host>/realms/<realm>/.well-known/openid-configuration
+SESSION_SECRET=a-random-secret-string
+```
+
+> **Important:** Always set `SESSION_SECRET` to a long random string in any non-`none` auth mode. The default value `change-me-in-production` must not be used in production.
+
 ### Web UI Configuration
 
 | Variable | Default | Description |
