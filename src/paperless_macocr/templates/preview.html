@@ -54,12 +54,14 @@
   <div style="flex:1; min-width:0;">
     <div class="flex items-center gap-1">
       <a href="/ui" class="muted text-sm">← Back to documents</a>
-      {% if prev_doc_id %}
-        <a href="/ui/ocr/{{ prev_doc_id }}" class="btn btn-sm" style="border-color:var(--border);" title="Previous document">‹ Prev</a>
-      {% endif %}
-      {% if next_doc_id %}
-        <a href="/ui/ocr/{{ next_doc_id }}" class="btn btn-sm" style="border-color:var(--border);" title="Next document" id="next-doc-link">Next ›</a>
-      {% endif %}
+      <a id="prev-doc-link"
+         href="{% if prev_doc_id %}/ui/ocr/{{ prev_doc_id }}{% else %}#{% endif %}"
+         class="btn btn-sm {{ 'hidden' if not prev_doc_id else '' }}"
+         style="border-color:var(--border);" title="Previous document">‹ Prev</a>
+      <a id="next-doc-link"
+         href="{% if next_doc_id %}/ui/ocr/{{ next_doc_id }}{% else %}#{% endif %}"
+         class="btn btn-sm {{ 'hidden' if not next_doc_id else '' }}"
+         style="border-color:var(--border);" title="Next document">Next ›</a>
     </div>
     <h1 class="mt-1">{{ doc.title or doc.original_file_name or "Untitled" }}</h1>
     <div class="text-sm muted mt-1">
@@ -251,6 +253,25 @@ _combinedTextarea.addEventListener('input', () => {
   _charCount.textContent = _combinedTextarea.value.length;
 });
 
+// ── Restore prev/next nav from localStorage ─────────────────────
+(function(){
+  try {
+    const ids = JSON.parse(localStorage.getItem('ocr-nav-ids') || '[]');
+    const idx = ids.indexOf({{ document_id }});
+    if (idx < 0) return;
+    const prevEl = document.getElementById('prev-doc-link');
+    const nextEl = document.getElementById('next-doc-link');
+    if (prevEl && idx > 0) {
+      prevEl.href = '/ui/ocr/' + ids[idx - 1];
+      prevEl.classList.remove('hidden');
+    }
+    if (nextEl && idx < ids.length - 1) {
+      nextEl.href = '/ui/ocr/' + ids[idx + 1];
+      nextEl.classList.remove('hidden');
+    }
+  } catch(e) {}
+})();
+
 // ── Auto-advance toggle (localStorage) ───────────────────────────
 const _autoAdvance = document.getElementById('auto-advance');
 _autoAdvance.checked = localStorage.getItem('ocr-auto-advance') === '1';
@@ -281,7 +302,7 @@ _approveForm.addEventListener('submit', async (e) => {
       throw new Error(text || resp.statusText);
     }
     showToast('OCR approved for document #{{ document_id }}', 'success');
-    if (_autoAdvance.checked && _nextDocLink) {
+    if (_autoAdvance.checked && _nextDocLink && _nextDocLink.href !== '#' && !_nextDocLink.classList.contains('hidden')) {
       setTimeout(() => { window.location.href = _nextDocLink.href; }, 600);
     }
   } catch (err) {

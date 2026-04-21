@@ -91,7 +91,8 @@
         {% if _prev is not none %}{% if _qs.append('prev=' ~ _prev) %}{% endif %}{% endif %}
         {% if _next is not none %}{% if _qs.append('next=' ~ _next) %}{% endif %}{% endif %}
         <a href="/ui/ocr/{{ doc.id }}{% if _qs %}?{{ _qs|join('&') }}{% endif %}"
-           class="btn btn-sm btn-primary">OCR</a>
+           class="btn btn-sm btn-primary ocr-link"
+           data-doc-id="{{ doc.id }}">OCR</a>
       </div>
     </div>
   {% else %}
@@ -118,5 +119,16 @@
     {% endif %}
   </div>
 {% endif %}
+
+<script>
+(function(){
+  var ids = {{ doc_ids | tojson }};
+  document.querySelectorAll('.ocr-link').forEach(function(a){
+    a.addEventListener('click', function(){
+      localStorage.setItem('ocr-nav-ids', JSON.stringify(ids));
+    });
+  });
+})();
+</script>
 
 {% endblock %}
