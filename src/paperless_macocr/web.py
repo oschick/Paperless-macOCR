@@ -148,15 +148,26 @@ async def logout():
 
 
 @router.get("/ui", response_class=HTMLResponse)
-async def document_list(request: Request, page: int = 1, search: str = ""):
+async def document_list(
+    request: Request, page: int = 1, search: str = "", tag: str = ""
+):
     _require("_settings", "_paperless")
     exclude_tags = _settings.get_exclude_tag_ids()  # type: ignore[union-attr]
     tag_map = await _get_tag_map()
+
+    # Resolve filter tag name → ID
+    filter_tag_ids: list[int] | None = None
+    if tag:
+        reverse_map = {v: k for k, v in tag_map.items()}
+        tid = reverse_map.get(tag)
+        if tid is not None:
+            filter_tag_ids = [tid]
 
     data = await _paperless.list_documents(  # type: ignore[union-attr]
         page=page,
         page_size=20,
         search=search,
+        tags_id_all=filter_tag_ids,
         tags_id_none=exclude_tags or None,
     )
 
@@ -171,6 +182,12 @@ async def document_list(request: Request, page: int = 1, search: str = ""):
         doc["paperless_link"] = f"{paperless_base}/documents/{doc['id']}/details"
         doc["has_content"] = bool(doc.get("content", "").strip())
 
+    # Build sorted list of all tag names for the filter dropdown
+    all_tag_names = sorted(tag_map.values(), key=str.lower)
+
+    # Ordered document IDs visible on this page (for prev/next navigation)
+    doc_ids = [d["id"] for d in documents]
+
     return templates.TemplateResponse(
         request,
         "documents.html",
@@ -180,6 +197,9 @@ async def document_list(request: Request, page: int = 1, search: str = ""):
             "total_pages": total_pages,
             "total": total,
             "search": search,
+            "filter_tag": tag,
+            "all_tag_names": all_tag_names,
+            "doc_ids": doc_ids,
             "user": _user(request),
             "auth_mode": _settings.web_ui_auth,
             "exclude_tags": [tag_map.get(t, f"#{t}") for t in exclude_tags],
@@ -191,7 +211,12 @@ async def document_list(request: Request, page: int = 1, search: str = ""):
 
 
 @router.get("/ui/ocr/{document_id}", response_class=HTMLResponse)
-async def ocr_preview(request: Request, document_id: int):
+async def ocr_preview(
+    request: Request,
+    document_id: int,
+    prev: int | None = None,
+    next: int | None = None,
+):
     _require("_settings", "_paperless", "_macocr")
 
     doc_meta = await _paperless.get_document(document_id)  # type: ignore[union-attr]
@@ -245,6 +270,9 @@ async def ocr_preview(request: Request, document_id: int):
             "correspondents": correspondents,
             "document_types": doc_types,
             "all_tags": all_tags,
+            # Prev / next document navigation
+            "prev_doc_id": prev,
+            "next_doc_id": next,
             # Store serialised OCR data in a hidden field for approval
             "ocr_data_json": _serialize_ocr_data(page_results),
         },
@@ -309,6 +337,12 @@ async def ocr_approve(request: Request, document_id: int):
     if build_pdf:
         await _rebuild_and_replace_pdf(document_id, combined_text, tag_ids)
 
+    # Return JSON for async fetch, redirect for plain form posts
+    is_ajax = "x-requested-with" in request.headers or request.headers.get("accept", "").startswith(
+        "application/json"
+    )
+    if is_ajax:
+        return JSONResponse({"ok": True, "document_id": document_id})
     return RedirectResponse(f"/ui?approved={document_id}", status_code=303)
 
 

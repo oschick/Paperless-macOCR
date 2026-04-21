@@ -35,13 +35,32 @@
   #tag-chips { display: flex; flex-wrap: wrap; gap: 0; }
   #tag-input { flex: 1; min-width: 120px; width: auto; }
   #tags-hidden { display: none; }
+  textarea.page-text-edit {
+    white-space: pre-wrap; font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 0.85rem; background: var(--badge-bg); padding: 1rem; border-radius: 6px;
+    border: 1px solid var(--border); color: var(--fg); line-height: 1.5;
+  }
+  textarea.page-text-edit:focus { outline: 2px solid var(--primary); border-color: var(--primary); }
+  kbd {
+    display: inline-block; padding: 0.1rem 0.4rem; border: 1px solid var(--border);
+    border-radius: 4px; background: var(--badge-bg); font-size: 0.78rem;
+    font-family: inherit; line-height: 1.4;
+  }
 </style>
 {% endblock %}
 {% block content %}
 
 <div class="flex flex-between items-center mb-2">
-  <div>
-    <a href="/ui" class="muted text-sm">← Back to documents</a>
+  <div style="flex:1; min-width:0;">
+    <div class="flex items-center gap-1">
+      <a href="/ui" class="muted text-sm">← Back to documents</a>
+      {% if prev_doc_id %}
+        <a href="/ui/ocr/{{ prev_doc_id }}" class="btn btn-sm" style="border-color:var(--border);" title="Previous document">‹ Prev</a>
+      {% endif %}
+      {% if next_doc_id %}
+        <a href="/ui/ocr/{{ next_doc_id }}" class="btn btn-sm" style="border-color:var(--border);" title="Next document" id="next-doc-link">Next ›</a>
+      {% endif %}
+    </div>
     <h1 class="mt-1">{{ doc.title or doc.original_file_name or "Untitled" }}</h1>
     <div class="text-sm muted mt-1">
       #{{ document_id }} &middot; {{ num_pages }} page{{ "s" if num_pages != 1 else "" }}
@@ -49,6 +68,11 @@
         <span class="badge">{{ tag }}</span>
       {% endfor %}
     </div>
+  </div>
+  <div class="flex items-center gap-1" style="flex-shrink:0;">
+    <label class="flex items-center gap-1 text-sm" title="After approving, auto-advance to next document">
+      <input type="checkbox" id="auto-advance"> Auto-advance
+    </label>
   </div>
 </div>
 
@@ -87,7 +111,8 @@
         </div>
         <div>
           <div class="text-sm muted mb-1">OCR Text ({{ page_texts[i]|length }} chars)</div>
-          <div class="page-text">{{ page_texts[i] or "(no text detected)" }}</div>
+          <textarea class="page-text page-text-edit" data-page="{{ i }}"
+                    rows="12" style="width:100%; resize:vertical;">{{ page_texts[i] or "" }}</textarea>
         </div>
       </div>
     </div>
@@ -132,7 +157,7 @@
 <!-- Approve form -->
 <div class="card mt-2" style="border-color: var(--success);">
   <h3 class="mb-1">Approve & Apply OCR</h3>
-  <form method="post" action="/ui/ocr/{{ document_id }}/approve">
+  <form id="approve-form" method="post" action="/ui/ocr/{{ document_id }}/approve">
 
     <!-- Metadata fields -->
     <div class="meta-grid mb-1">
@@ -181,7 +206,7 @@
 
     <!-- OCR text -->
     <label for="f-text" style="font-size:0.8rem; color:var(--muted);">
-      OCR text ({{ combined_text|length }} chars)
+      Combined OCR text (<span id="char-count">{{ combined_text|length }}</span> chars)
     </label>
     <textarea id="f-text" name="combined_text" rows="6"
               style="font-family: monospace; font-size: 0.85rem; margin-bottom:0.5rem;">{{ combined_text }}</textarea>
@@ -193,9 +218,11 @@
       </label>
     </div>
     <div class="flex gap-1 mt-2">
-      <button type="submit" class="btn btn-success">Approve & Apply</button>
+      <button type="submit" class="btn btn-success" id="approve-btn">Approve & Apply</button>
       <a href="/ui" class="btn" style="border-color: var(--border);">Cancel</a>
+      <span id="approve-spinner" class="muted text-sm hidden" style="align-self:center;">Processing…</span>
     </div>
+    <p class="text-sm muted mt-1">Tip: <kbd>Ctrl</kbd>+<kbd>Enter</kbd> to approve quickly</p>
   </form>
 </div>
 
@@ -207,6 +234,71 @@ function showTab(tab) {
   document.querySelectorAll('[id^="tab-"]').forEach(el => el.classList.add('hidden'));
   document.getElementById('tab-' + tab).classList.remove('hidden');
 }
+
+// ── Per-page textarea → combined text sync ───────────────────────
+const _combinedTextarea = document.getElementById('f-text');
+const _charCount = document.getElementById('char-count');
+const _pageEdits = document.querySelectorAll('.page-text-edit');
+
+function _syncCombinedFromPages() {
+  const parts = [];
+  _pageEdits.forEach(ta => { if (ta.value.trim()) parts.push(ta.value.trim()); });
+  _combinedTextarea.value = parts.join('\n\n');
+  _charCount.textContent = _combinedTextarea.value.length;
+}
+_pageEdits.forEach(ta => ta.addEventListener('input', _syncCombinedFromPages));
+_combinedTextarea.addEventListener('input', () => {
+  _charCount.textContent = _combinedTextarea.value.length;
+});
+
+// ── Auto-advance toggle (localStorage) ───────────────────────────
+const _autoAdvance = document.getElementById('auto-advance');
+_autoAdvance.checked = localStorage.getItem('ocr-auto-advance') === '1';
+_autoAdvance.addEventListener('change', () => {
+  localStorage.setItem('ocr-auto-advance', _autoAdvance.checked ? '1' : '0');
+});
+
+// ── Async form submission with toast ─────────────────────────────
+const _approveForm = document.getElementById('approve-form');
+const _approveBtn = document.getElementById('approve-btn');
+const _spinner = document.getElementById('approve-spinner');
+const _nextDocLink = document.getElementById('next-doc-link');
+
+_approveForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  _approveBtn.disabled = true;
+  _spinner.classList.remove('hidden');
+
+  try {
+    const formData = new FormData(_approveForm);
+    const resp = await fetch(_approveForm.action, {
+      method: 'POST',
+      headers: { 'Accept': 'application/json' },
+      body: formData,
+    });
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(text || resp.statusText);
+    }
+    showToast('OCR approved for document #{{ document_id }}', 'success');
+    if (_autoAdvance.checked && _nextDocLink) {
+      setTimeout(() => { window.location.href = _nextDocLink.href; }, 600);
+    }
+  } catch (err) {
+    showToast('Approval failed: ' + err.message, 'danger', 6000);
+    _approveBtn.disabled = false;
+  } finally {
+    _spinner.classList.add('hidden');
+  }
+});
+
+// ── Keyboard shortcut: Ctrl+Enter to approve ─────────────────────
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+    e.preventDefault();
+    _approveForm.requestSubmit();
+  }
+});
 
 // ── Bounding-box overlay ──────────────────────────────────────────
 const _ocrPages = JSON.parse(document.getElementById('ocr-data-json').textContent);

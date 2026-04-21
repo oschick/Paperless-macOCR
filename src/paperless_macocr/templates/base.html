@@ -74,6 +74,21 @@
   .status-has-text { background: var(--success); }
   .status-no-text { background: var(--warning); }
   .hidden { display: none; }
+  /* Toast notifications */
+  .toast-container {
+    position: fixed; bottom: 1.5rem; right: 1.5rem; z-index: 9999;
+    display: flex; flex-direction: column-reverse; gap: 0.5rem;
+  }
+  .toast {
+    padding: 0.7rem 1.2rem; border-radius: 8px; font-size: 0.9rem; color: #fff;
+    box-shadow: 0 4px 16px rgba(0,0,0,.3); opacity: 0;
+    transform: translateY(10px); transition: opacity .3s, transform .3s;
+    max-width: 360px; word-break: break-word;
+  }
+  .toast.show { opacity: 1; transform: translateY(0); }
+  .toast-success { background: var(--success); }
+  .toast-danger { background: var(--danger); }
+  .toast-info { background: var(--primary); }
 </style>
 {% block extra_head %}{% endblock %}
 </head>
@@ -92,5 +107,19 @@
 <div class="container">
   {% block content %}{% endblock %}
 </div>
+<div class="toast-container" id="toast-container"></div>
+<script>
+function showToast(msg, type, duration) {
+  type = type || 'info';
+  duration = duration || 4000;
+  var c = document.getElementById('toast-container');
+  var t = document.createElement('div');
+  t.className = 'toast toast-' + type;
+  t.textContent = msg;
+  c.appendChild(t);
+  requestAnimationFrame(function(){ t.classList.add('show'); });
+  setTimeout(function(){ t.classList.remove('show'); setTimeout(function(){ t.remove(); }, 300); }, duration);
+}
+</script>
 </body>
 </html>
