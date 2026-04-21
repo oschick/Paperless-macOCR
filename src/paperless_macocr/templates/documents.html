@@ -85,7 +85,12 @@
       <div class="doc-actions">
         <a href="{{ doc.paperless_link }}" target="_blank" class="btn btn-sm"
            style="border-color: var(--border);" title="Open in Paperless">↗</a>
-        <a href="/ui/ocr/{{ doc.id }}?prev={{ doc_ids[loop.index0 - 1] if loop.index0 > 0 else '' }}&next={{ doc_ids[loop.index0 + 1] if loop.index0 < doc_ids|length - 1 else '' }}"
+        {% set _prev = doc_ids[loop.index0 - 1] if loop.index0 > 0 else None %}
+        {% set _next = doc_ids[loop.index0 + 1] if loop.index0 < doc_ids|length - 1 else None %}
+        {% set _qs = [] %}
+        {% if _prev is not none %}{% if _qs.append('prev=' ~ _prev) %}{% endif %}{% endif %}
+        {% if _next is not none %}{% if _qs.append('next=' ~ _next) %}{% endif %}{% endif %}
+        <a href="/ui/ocr/{{ doc.id }}{% if _qs %}?{{ _qs|join('&') }}{% endif %}"
            class="btn btn-sm btn-primary">OCR</a>
       </div>
     </div>
