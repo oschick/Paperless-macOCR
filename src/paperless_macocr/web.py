@@ -263,7 +263,7 @@ async def ocr_approve(request: Request, document_id: int):
     if not combined_text.strip():
         raise HTTPException(status_code=422, detail="No text to approve")
 
-    # ── Resolve (and auto-create) metadata fields ─────────────────────
+    # ── Step 0: Resolve (and auto-create) metadata entities ──────────
     title = str(form.get("title", "")).strip() or None
     created = str(form.get("created", "")).strip() or None
 
@@ -275,21 +275,14 @@ async def ocr_approve(request: Request, document_id: int):
     corr_id: int | None = None
     if corr_name:
         match = next((c for c in correspondents if c["name"] == corr_name), None)
-        if match:
-            corr_id = match["id"]
-        else:
-            created_corr = await _paperless.create_correspondent(corr_name)  # type: ignore[union-attr]
-            corr_id = created_corr["id"]
+        corr_id = match["id"] if match else (await _paperless.create_correspondent(corr_name))["id"]  # type: ignore[union-attr]
 
     dtype_id: int | None = None
     if dtype_name:
         match = next((d for d in doc_types if d["name"] == dtype_name), None)
-        if match:
-            dtype_id = match["id"]
-        else:
-            created_dt = await _paperless.create_document_type(dtype_name)  # type: ignore[union-attr]
-            dtype_id = created_dt["id"]
+        dtype_id = match["id"] if match else (await _paperless.create_document_type(dtype_name))["id"]  # type: ignore[union-attr]
 
+    # tag_ids is None when the user left the field blank (→ don't change tags on orig)
     tag_ids: list[int] | None = None
     if tag_names_raw:
         name_to_id = {t["name"]: t["id"] for t in all_tags}
@@ -298,10 +291,9 @@ async def ocr_approve(request: Request, document_id: int):
             if name in name_to_id:
                 tag_ids.append(name_to_id[name])
             else:
-                new_tag = await _paperless.create_tag(name)  # type: ignore[union-attr]
-                tag_ids.append(new_tag["id"])
+                tag_ids.append((await _paperless.create_tag(name))["id"])  # type: ignore[union-attr]
 
-    # ── Patch document ────────────────────────────────────────────────
+    # ── Step 1: Apply metadata + content to original document ────────
     await _paperless.update_document_metadata(  # type: ignore[union-attr]
         document_id,
         title=title,
@@ -313,9 +305,9 @@ async def ocr_approve(request: Request, document_id: int):
     )
     logger.info("Web UI: approved OCR + metadata for document %d", document_id)
 
-    # ── Optionally rebuild searchable PDF and re-upload ───────────────
+    # ── Steps 2-4: Rebuild PDF, wait, restore exact metadata ─────────
     if build_pdf:
-        await _rebuild_and_replace_pdf(document_id, combined_text)
+        await _rebuild_and_replace_pdf(document_id, combined_text, tag_ids)
 
     return RedirectResponse(f"/ui?approved={document_id}", status_code=303)
 
@@ -324,21 +316,36 @@ _TASK_POLL_INTERVAL = 2  # seconds
 _TASK_POLL_MAX = 60  # max attempts
 
 
-async def _rebuild_and_replace_pdf(document_id: int, combined_text: str) -> None:
-    """Build a searchable PDF and upload it to Paperless, replacing the original.
+async def _rebuild_and_replace_pdf(
+    document_id: int,
+    combined_text: str,
+    approved_tag_ids: list[int] | None,
+) -> None:
+    """Rebuild a searchable PDF and replace the original document in Paperless.
 
-    Mirrors _replace_with_searchable_pdf in app.py but operates on the
-    web-UI module-level paperless/macocr/settings singletons.
+    Workflow:
+      1. Re-fetch original (metadata was already patched by ocr_approve step 1).
+      2. Download original, re-OCR all pages, build searchable PDF.
+      3. Upload PDF without tags so Paperless ingests it cleanly.
+      4. Wait for ingestion to complete.
+      5. PATCH new doc: set content, copy title/correspondent/document_type/created
+         from original, and overwrite ALL tags with the user-approved set
+         (stripping anything Paperless auto-applied during ingestion).
+      6. Delete the original document.
     """
-    # Lazy import to avoid circular dependency at module level
     from paperless_macocr.app import _replacing_titles
 
+    # Step 1 — re-fetch original to get the canonical post-patch metadata
     doc_meta = await _paperless.get_document(document_id)  # type: ignore[union-attr]
     mime = doc_meta.get("mime_type", "")
     if mime != "application/pdf":
         logger.warning("Web UI: rebuild_pdf skipped — document %d is not a PDF (%s)", document_id, mime)
         return
 
+    # If the user left tags blank, fall back to whatever is currently on the doc
+    final_tag_ids: list[int] = approved_tag_ids if approved_tag_ids is not None else doc_meta.get("tags", [])
+
+    # Step 2 — re-OCR and build searchable PDF
     file_bytes = await _paperless.download_document(document_id, original=True)  # type: ignore[union-attr]
     num_pages = pdf_page_count(file_bytes)
     page_results: list[OcrPageData] = []
@@ -355,6 +362,7 @@ async def _rebuild_and_replace_pdf(document_id: int, combined_text: str) -> None
     title = doc_meta.get("title") or f"doc-{document_id}"
     _replacing_titles.add(title)
     try:
+        # Step 3 — upload WITHOUT tags; Paperless may auto-apply its own rules
         task_uuid = await _paperless.upload_document(  # type: ignore[union-attr]
             searchable_pdf,
             f"{title}.pdf",
@@ -362,10 +370,11 @@ async def _rebuild_and_replace_pdf(document_id: int, combined_text: str) -> None
             correspondent=doc_meta.get("correspondent"),
             document_type=doc_meta.get("document_type"),
             storage_path=doc_meta.get("storage_path"),
-            tags=doc_meta.get("tags"),
             archive_serial_number=doc_meta.get("archive_serial_number"),
+            # tags intentionally omitted — overwritten in step 5
         )
 
+        # Step 4 — wait for ingestion
         new_doc_id = None
         for _ in range(_TASK_POLL_MAX):
             await asyncio.sleep(_TASK_POLL_INTERVAL)
@@ -386,13 +395,26 @@ async def _rebuild_and_replace_pdf(document_id: int, combined_text: str) -> None
             logger.error("Web UI: consumption timed out for document %d (task %s)", document_id, task_uuid)
             return
 
-        await _paperless.update_document_content(int(new_doc_id), combined_text)  # type: ignore[union-attr]
+        new_doc_id = int(new_doc_id)
 
-        # Remove inbox / auto-added tags from the new document
-        remove_entries = _settings.get_replace_pdf_remove_tags()  # type: ignore[union-attr]
-        if remove_entries:
-            await _paperless.remove_tags_from_document(int(new_doc_id), remove_entries)  # type: ignore[union-attr]
+        # Step 5 — overwrite new doc's metadata: copy from original, replace
+        # ALL tags (including anything Paperless auto-applied) with the approved set
+        await _paperless.update_document_metadata(  # type: ignore[union-attr]
+            new_doc_id,
+            title=doc_meta.get("title"),
+            created=doc_meta.get("created"),
+            correspondent=doc_meta.get("correspondent"),
+            document_type=doc_meta.get("document_type"),
+            tags=final_tag_ids,
+            content=combined_text,
+        )
+        logger.info(
+            "Web UI: set metadata on new document %d (tags=%s)",
+            new_doc_id,
+            final_tag_ids,
+        )
 
+        # Step 6 — delete the original
         await _paperless.delete_document(document_id)  # type: ignore[union-attr]
         logger.info("Web UI: replaced document %d with searchable PDF (new id: %d)", document_id, new_doc_id)
     finally:
