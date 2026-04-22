@@ -22,8 +22,18 @@
     transform: translateY(calc(-50% + 40px));
     pointer-events: none;
   }
-  .thumb-wrap:hover .thumb-zoom {
-    display: block;
+  /* Only show zoom on non-touch (hover-capable) devices */
+  @media (hover: hover) {
+    .thumb-wrap:hover .thumb-zoom { display: block; }
+  }
+  /* On small screens the thumbnail can be smaller */
+  @media (max-width: 600px) {
+    .thumb { width: 48px; height: 64px; }
+    .doc-row { padding: 0.6rem 0; }
+    .doc-title { white-space: normal; font-size: 0.95rem; }
+    .search-form { flex-direction: column; }
+    .search-form input[type="text"],
+    .search-form select { max-width: 100% !important; }
   }
 </style>
 {% endblock %}
@@ -38,10 +48,10 @@
   <span class="muted text-sm">{{ total }} document{{ "s" if total != 1 else "" }}</span>
 </div>
 
-<form method="get" action="/ui" class="flex gap-1 mb-2" style="flex-wrap: wrap;">
+<form method="get" action="/ui" class="search-form flex gap-1 mb-2" style="flex-wrap: wrap;">
   <input type="text" name="search" value="{{ search }}" placeholder="Search documents…"
-         style="max-width: 400px;">
-  <select name="tag" style="max-width: 200px;" onchange="this.form.submit()">
+         style="max-width: 400px; flex: 1; min-width: 150px;">
+  <select name="tag" style="max-width: 200px; min-width: 120px;" onchange="this.form.submit()">
     <option value="">All tags</option>
     {% for t in all_tag_names %}
       <option value="{{ t }}" {% if t == filter_tag %}selected{% endif %}>{{ t }}</option>
