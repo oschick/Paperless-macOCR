@@ -8,6 +8,7 @@ import re
 from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from paperless_macocr.config import Settings, get_settings
@@ -28,6 +29,11 @@ logger = logging.getLogger(__name__)
 # added *before* uploading so it is already in the set when the
 # webhook for the new document fires.
 _replacing_titles: set[str] = set()
+
+# Signer and OAuth client for the web UI - populated at module level so they
+# are available before the app starts (middleware registration requirement).
+_web_signer = None
+_web_oauth = None
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +57,13 @@ async def lifespan(_app: FastAPI):
     state.settings = settings
     state.paperless = PaperlessClient(settings)
     state.macocr = MacOCRClient(settings)
+
+    # Set up web UI if enabled
+    if settings.web_ui_enabled:
+        from paperless_macocr.web import register_web_ui
+
+        register_web_ui(settings, state.paperless, state.macocr, _web_signer, _web_oauth)
+
     logger.info("Paperless-macOCR service started")
     yield
     await state.paperless.close()
@@ -64,6 +77,23 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# ---------------------------------------------------------------------------
+# Web UI — middleware and router must be registered BEFORE the app starts.
+# (Starlette raises RuntimeError if add_middleware is called post-startup.)
+# Wrapped in try/except so the module can be imported in test environments
+# where the required env vars are not set.
+# ---------------------------------------------------------------------------
+try:
+    _boot_settings = get_settings()
+    if _boot_settings.web_ui_enabled:
+        from paperless_macocr.auth import setup_auth
+        from paperless_macocr.web import router as web_router
+
+        _web_signer, _web_oauth = setup_auth(app, _boot_settings)
+        app.include_router(web_router)
+except Exception:  # noqa: S110
+    pass  # env vars absent (e.g. test environment) — lifespan will validate
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +327,12 @@ async def _replace_with_searchable_pdf(
 @app.get("/health", response_model=HealthResponse)
 async def health() -> dict[str, str]:
     return {"status": "ok", "service": "paperless-macocr"}
+
+
+@app.get("/", include_in_schema=False)
+async def root():
+    """Redirect root to the web UI."""
+    return RedirectResponse("/ui")
 
 
 @app.post("/webhook", response_model=StatusResponse)

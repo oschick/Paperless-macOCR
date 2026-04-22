@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% block title %}Documents - Paperless macOCR{% endblock %}
+{% block extra_head %}
+<style>
+  .thumb-wrap {
+    position: relative;
+    flex-shrink: 0;
+  }
+  .thumb-wrap .thumb-zoom {
+    display: none;
+    position: absolute;
+    left: 0; top: 0;
+    z-index: 100;
+    width: 220px;
+    height: auto;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    box-shadow: 0 8px 24px rgba(0,0,0,.35);
+    object-fit: contain;
+    background: var(--card-bg);
+    /* pop upward so it doesn't go off-screen below */
+    transform: translateY(calc(-50% + 40px));
+    pointer-events: none;
+  }
+  /* Only show zoom on non-touch (hover-capable) devices */
+  @media (hover: hover) {
+    .thumb-wrap:hover .thumb-zoom { display: block; }
+  }
+  /* On small screens the thumbnail can be smaller */
+  @media (max-width: 600px) {
+    .thumb { width: 48px; height: 64px; }
+    .doc-row { padding: 0.6rem 0; }
+    .doc-title { white-space: normal; font-size: 0.95rem; }
+    .search-form { flex-direction: column; }
+    .search-form input[type="text"],
+    .search-form select { max-width: 100% !important; }
+  }
+</style>
+{% endblock %}
+{% block content %}
+
+{% if request.query_params.get('approved') %}
+  <div class="alert alert-success">OCR approved and applied to document #{{ request.query_params.get('approved') }}.</div>
+{% endif %}
+
+<div class="flex flex-between items-center mb-2">
+  <h1>Documents</h1>
+  <span class="muted text-sm">{{ total }} document{{ "s" if total != 1 else "" }}</span>
+</div>
+
+<form method="get" action="/ui" class="search-form flex gap-1 mb-2" style="flex-wrap: wrap;">
+  <input type="text" name="search" value="{{ search }}" placeholder="Search documents…"
+         style="max-width: 400px; flex: 1; min-width: 150px;">
+  <select name="tag" style="max-width: 200px; min-width: 120px;" onchange="this.form.submit()">
+    <option value="">All tags</option>
+    {% for t in all_tag_names %}
+      <option value="{{ t }}" {% if t == filter_tag %}selected{% endif %}>{{ t }}</option>
+    {% endfor %}
+  </select>
+  <button type="submit" class="btn btn-primary">Search</button>
+  {% if search or filter_tag %}
+    <a href="/ui" class="btn" style="border-color: var(--border);">Clear</a>
+  {% endif %}
+</form>
+
+{% if exclude_tags %}
+  <p class="text-sm muted mb-2">
+    Excluding tags: {% for t in exclude_tags %}<span class="badge">{{ t }}</span>{% endfor %}
+  </p>
+{% endif %}
+
+<div class="card">
+  {% for doc in documents %}
+    <div class="doc-row">
+      <div class="thumb-wrap">
+        <img src="/ui/thumb/{{ doc.id }}" class="thumb" alt="Thumbnail" loading="lazy">
+        <img src="/ui/thumb/{{ doc.id }}" class="thumb-zoom" alt="" loading="lazy">
+      </div>
+      <div class="doc-info">
+        <div class="doc-title">
+          <span class="status-dot {{ 'status-has-text' if doc.has_content else 'status-no-text' }}"
+                title="{{ 'Has text content' if doc.has_content else 'No text content' }}"></span>
+          {{ doc.title or doc.original_file_name or "Untitled" }}
+        </div>
+        <div class="text-sm muted">
+          #{{ doc.id }} &middot; {{ doc.added[:10] if doc.added else "" }} &middot;
+          {{ doc.correspondent__name if doc.correspondent__name else "" }}
+        </div>
+        <div class="mt-1">
+          {% for tag in doc.tag_names %}
+            <span class="badge">{{ tag }}</span>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="doc-actions">
+        <a href="{{ doc.paperless_link }}" target="_blank" class="btn btn-sm"
+           style="border-color: var(--border);" title="Open in Paperless">↗</a>
+        {% set _prev = doc_ids[loop.index0 - 1] if loop.index0 > 0 else None %}
+        {% set _next = doc_ids[loop.index0 + 1] if loop.index0 < doc_ids|length - 1 else None %}
+        {% set _qs = [] %}
+        {% if _prev is not none %}{% if _qs.append('prev=' ~ _prev) %}{% endif %}{% endif %}
+        {% if _next is not none %}{% if _qs.append('next=' ~ _next) %}{% endif %}{% endif %}
+        <a href="/ui/ocr/{{ doc.id }}{% if _qs %}?{{ _qs|join('&') }}{% endif %}"
+           class="btn btn-sm btn-primary ocr-link"
+           data-doc-id="{{ doc.id }}">OCR</a>
+      </div>
+    </div>
+  {% else %}
+    <p class="muted" style="padding: 2rem; text-align: center;">No documents found.</p>
+  {% endfor %}
+</div>
+
+{% if total_pages > 1 %}
+  <div class="pagination">
+    {% if page > 1 %}
+      <a href="/ui?page={{ page - 1 }}&search={{ search }}&tag={{ filter_tag }}">← Prev</a>
+    {% endif %}
+    {% for p in range(1, total_pages + 1) %}
+      {% if p == page %}
+        <span class="active">{{ p }}</span>
+      {% elif p <= 3 or p >= total_pages - 2 or (p >= page - 2 and p <= page + 2) %}
+        <a href="/ui?page={{ p }}&search={{ search }}&tag={{ filter_tag }}">{{ p }}</a>
+      {% elif p == 4 or p == total_pages - 3 %}
+        <span class="muted">…</span>
+      {% endif %}
+    {% endfor %}
+    {% if page < total_pages %}
+      <a href="/ui?page={{ page + 1 }}&search={{ search }}&tag={{ filter_tag }}">Next →</a>
+    {% endif %}
+  </div>
+{% endif %}
+
+<script>
+(function(){
+  var ids = {{ doc_ids | tojson }};
+  document.querySelectorAll('.ocr-link').forEach(function(a){
+    a.addEventListener('click', function(){
+      localStorage.setItem('ocr-nav-ids', JSON.stringify(ids));
+    });
+  });
+})();
+</script>
+
+{% endblock %}

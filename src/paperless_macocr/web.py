@@ -1,0 +1,569 @@
+"""Web UI routes for document browsing, OCR preview, and approval."""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import logging
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.templating import Jinja2Templates
+
+from paperless_macocr.auth import (
+    _SESSION_COOKIE,
+    _SESSION_MAX_AGE,
+    _Signer,
+    verify_basic,
+)
+from paperless_macocr.pdf import (
+    pdf_embed_text_layer,
+    pdf_pages_to_png,
+)
+
+if TYPE_CHECKING:
+    from authlib.integrations.starlette_client import OAuth
+
+    from paperless_macocr.config import Settings
+    from paperless_macocr.ocr import MacOCRClient, OcrPageData
+    from paperless_macocr.paperless import PaperlessClient
+
+logger = logging.getLogger(__name__)
+
+_TEMPLATES_DIR = Path(__file__).parent / "templates"
+templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+
+router = APIRouter()
+
+# These are set by register_web_ui() at startup
+_settings: Settings | None = None
+_paperless: PaperlessClient | None = None
+_macocr: MacOCRClient | None = None
+_signer: _Signer | None = None
+_oauth: OAuth | None = None
+_tag_cache: dict[int, str] = {}
+
+
+def register_web_ui(
+    settings: Settings,
+    paperless: PaperlessClient,
+    macocr: MacOCRClient,
+    signer: _Signer,
+    oauth: OAuth | None,
+) -> None:
+    """Inject dependencies into the web UI module."""
+    global _settings, _paperless, _macocr, _signer, _oauth
+    _settings = settings
+    _paperless = paperless
+    _macocr = macocr
+    _signer = signer
+    _oauth = oauth
+
+
+async def _get_tag_map() -> dict[int, str]:
+    """Fetch and cache the tag-id → tag-name mapping."""
+    global _tag_cache
+    if not _tag_cache and _paperless:
+        tags = await _paperless.list_tags()
+        _tag_cache = {t["id"]: t["name"] for t in tags}
+    return _tag_cache
+
+
+def _user(request: Request) -> str:
+    return getattr(request.state, "user", "anonymous")
+
+
+def _require(*names: str) -> None:
+    """Raise 503 if any of the named module-level dependencies are None."""
+    g = globals()
+    missing = [n for n in names if g.get(n) is None]
+    if missing:
+        raise HTTPException(status_code=503, detail="Web UI not initialised")
+
+
+# ─── Auth routes ────────────────────────────────────────────────────
+
+
+@router.get("/auth/login", response_class=HTMLResponse)
+async def login_page(request: Request, next: str = "/ui"):
+    _require("_settings")
+    if _settings.web_ui_auth == "none":  # type: ignore[union-attr]
+        return RedirectResponse("/ui")
+    if _settings.web_ui_auth == "oidc" and _oauth is not None:  # type: ignore[union-attr]
+        redirect_uri = _settings.oidc_redirect_uri or str(request.url_for("oidc_callback"))  # type: ignore[union-attr]
+        return await _oauth.oidc.authorize_redirect(request, redirect_uri, state=next)
+    return templates.TemplateResponse(request, "login.html", {"next_url": next})
+
+
+@router.post("/auth/login")
+async def login_submit(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    next: str = Form("/ui"),
+):
+    _require("_settings", "_signer")
+    if not verify_basic(
+        username,
+        password,
+        _settings.web_ui_username,
+        _settings.web_ui_password,  # type: ignore[union-attr]
+    ):
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {"next_url": next, "error": "Invalid credentials"},
+            status_code=401,
+        )
+    token = _signer.sign({"user": username})  # type: ignore[union-attr]
+    response = RedirectResponse(next, status_code=303)
+    response.set_cookie(_SESSION_COOKIE, token, max_age=_SESSION_MAX_AGE, httponly=True, samesite="lax")
+    return response
+
+
+@router.get("/auth/callback")
+async def oidc_callback(request: Request):
+    _require("_oauth", "_signer")
+    token = await _oauth.oidc.authorize_access_token(request)  # type: ignore[union-attr]
+    userinfo = token.get("userinfo", {})
+    user = userinfo.get("preferred_username") or userinfo.get("email") or "oidc-user"
+    session_token = _signer.sign({"user": user})  # type: ignore[union-attr]
+    next_url = request.query_params.get("state", "/ui")
+    response = RedirectResponse(next_url, status_code=303)
+    response.set_cookie(_SESSION_COOKIE, session_token, max_age=_SESSION_MAX_AGE, httponly=True, samesite="lax")
+    return response
+
+
+@router.get("/auth/logout")
+async def logout():
+    response = RedirectResponse("/auth/login")
+    response.delete_cookie(_SESSION_COOKIE)
+    return response
+
+
+# ─── Document list ──────────────────────────────────────────────────
+
+
+@router.get("/ui", response_class=HTMLResponse)
+async def document_list(request: Request, page: int = 1, search: str = "", tag: str = ""):
+    _require("_settings", "_paperless")
+    exclude_tags = _settings.get_exclude_tag_ids()  # type: ignore[union-attr]
+    tag_map = await _get_tag_map()
+
+    # Resolve filter tag name → ID
+    filter_tag_ids: list[int] | None = None
+    if tag:
+        reverse_map = {v: k for k, v in tag_map.items()}
+        tid = reverse_map.get(tag)
+        if tid is not None:
+            filter_tag_ids = [tid]
+
+    data = await _paperless.list_documents(  # type: ignore[union-attr]
+        page=page,
+        page_size=20,
+        search=search,
+        tags_id_all=filter_tag_ids,
+        tags_id_none=exclude_tags or None,
+    )
+
+    documents = data.get("results", [])
+    total = data.get("count", 0)
+    total_pages = (total + 19) // 20
+
+    # Enrich documents with tag names and paperless URL
+    paperless_base = str(_settings.paperless_url).rstrip("/")  # type: ignore[union-attr]
+    for doc in documents:
+        doc["tag_names"] = [tag_map.get(tid, f"#{tid}") for tid in doc.get("tags", [])]
+        doc["paperless_link"] = f"{paperless_base}/documents/{doc['id']}/details"
+        doc["has_content"] = bool(doc.get("content", "").strip())
+
+    # Build sorted list of all tag names for the filter dropdown
+    all_tag_names = sorted(tag_map.values(), key=str.lower)
+
+    # Ordered document IDs visible on this page (for prev/next navigation)
+    doc_ids = [d["id"] for d in documents]
+
+    return templates.TemplateResponse(
+        request,
+        "documents.html",
+        {
+            "documents": documents,
+            "page": page,
+            "total_pages": total_pages,
+            "total": total,
+            "search": search,
+            "filter_tag": tag,
+            "all_tag_names": all_tag_names,
+            "doc_ids": doc_ids,
+            "user": _user(request),
+            "auth_mode": _settings.web_ui_auth,
+            "exclude_tags": [tag_map.get(t, f"#{t}") for t in exclude_tags],
+        },
+    )
+
+
+# ─── OCR Preview ────────────────────────────────────────────────────
+
+
+@router.get("/ui/ocr/{document_id}", response_class=HTMLResponse)
+async def ocr_preview(
+    request: Request,
+    document_id: int,
+    prev: int | None = None,
+    next: int | None = None,
+):
+    _require("_settings", "_paperless", "_macocr")
+
+    doc_meta = await _paperless.get_document(document_id)  # type: ignore[union-attr]
+    file_bytes = await _paperless.download_document(document_id, original=True)  # type: ignore[union-attr]
+    mime_type = doc_meta.get("mime_type", "")
+    is_pdf = mime_type == "application/pdf"
+
+    loop = asyncio.get_running_loop()
+
+    # OCR all pages concurrently
+    page_results: list[OcrPageData] = []
+    page_previews: list[str] = []
+
+    if is_pdf:
+        # Batch-render all pages at both DPIs in two passes (opens the PDF only twice instead of 2*N times)
+        ocr_pngs, preview_pngs = await asyncio.gather(
+            loop.run_in_executor(None, pdf_pages_to_png, file_bytes, _settings.ocr_dpi),  # type: ignore[union-attr]
+            loop.run_in_executor(None, pdf_pages_to_png, file_bytes, 100),
+        )
+        num_pages = len(ocr_pngs)
+
+        async def _ocr_page(page_idx: int) -> tuple[OcrPageData, str]:
+            ocr_result = await _macocr.ocr_image(  # type: ignore[union-attr]
+                ocr_pngs[page_idx],
+                filename=f"page_{page_idx + 1:04d}.png",
+            )
+            return ocr_result, base64.b64encode(preview_pngs[page_idx]).decode()
+
+        results = await asyncio.gather(*(_ocr_page(i) for i in range(num_pages)))
+        for ocr_result, preview_b64 in results:
+            page_results.append(ocr_result)
+            page_previews.append(preview_b64)
+    else:
+        result = await _macocr.ocr_image(file_bytes, filename="document.png")  # type: ignore[union-attr]
+        page_results.append(result)
+        page_previews.append(base64.b64encode(file_bytes).decode())
+
+    combined_text = "\n\n".join(r.text.strip() for r in page_results if r.text.strip())
+    existing_text = doc_meta.get("content", "").strip()
+    has_existing = bool(existing_text)
+    tag_map, (correspondents, doc_types, all_tags) = await asyncio.gather(
+        _get_tag_map(),
+        _gather_meta_options(),
+    )
+
+    return templates.TemplateResponse(
+        request,
+        "preview.html",
+        {
+            "doc": doc_meta,
+            "document_id": document_id,
+            "combined_text": combined_text,
+            "existing_text": existing_text,
+            "has_existing": has_existing,
+            "page_previews": page_previews,
+            "page_texts": [r.text.strip() for r in page_results],
+            "num_pages": len(page_results),
+            "is_pdf": is_pdf,
+            "tag_names": [tag_map.get(t, f"#{t}") for t in doc_meta.get("tags", [])],
+            "user": _user(request),
+            "auth_mode": _settings.web_ui_auth,  # type: ignore[union-attr]
+            # Metadata options for autocomplete
+            "correspondents": correspondents,
+            "document_types": doc_types,
+            "all_tags": all_tags,
+            # Prev / next document navigation
+            "prev_doc_id": prev,
+            "next_doc_id": next,
+            # Store serialised OCR data in a hidden field for approval
+            "ocr_data_json": _serialize_ocr_data(page_results),
+        },
+    )
+
+
+@router.post("/ui/ocr/{document_id}/approve")
+async def ocr_approve(request: Request, document_id: int):
+    """Apply the OCR results and metadata edits to the document in Paperless."""
+    _require("_settings", "_paperless", "_macocr")
+
+    form = await request.form()
+    combined_text = str(form.get("combined_text", ""))
+    build_pdf = form.get("replace_pdf") == "on"
+    ocr_data_raw = form.get("ocr_data_json", "")
+    ocr_data_json = str(ocr_data_raw) if ocr_data_raw else ""
+    logger.debug(
+        "Web UI approve %d: ocr_data_json type=%s len=%d",
+        document_id,
+        type(ocr_data_raw).__name__,
+        len(ocr_data_json),
+    )
+
+    if not combined_text.strip():
+        raise HTTPException(status_code=422, detail="No text to approve")
+
+    # ── Step 0: Resolve (and auto-create) metadata entities ──────────
+    title = str(form.get("title", "")).strip() or None
+    created = str(form.get("created", "")).strip() or None
+
+    correspondents, doc_types, all_tags = await _gather_meta_options()
+    corr_name = str(form.get("correspondent", "")).strip()
+    dtype_name = str(form.get("document_type", "")).strip()
+    tag_names_raw = str(form.get("tags", "")).strip()
+
+    corr_id: int | None = None
+    if corr_name:
+        match = next((c for c in correspondents if c["name"] == corr_name), None)
+        corr_id = match["id"] if match else (await _paperless.create_correspondent(corr_name))["id"]  # type: ignore[union-attr]
+
+    dtype_id: int | None = None
+    if dtype_name:
+        match = next((d for d in doc_types if d["name"] == dtype_name), None)
+        dtype_id = match["id"] if match else (await _paperless.create_document_type(dtype_name))["id"]  # type: ignore[union-attr]
+
+    # tag_ids is None when the user left the field blank (→ don't change tags on orig)
+    tag_ids: list[int] | None = None
+    if tag_names_raw:
+        name_to_id = {t["name"]: t["id"] for t in all_tags}
+        tag_ids = []
+        for name in (n.strip() for n in tag_names_raw.split(",") if n.strip()):
+            if name in name_to_id:
+                tag_ids.append(name_to_id[name])
+            else:
+                tag_ids.append((await _paperless.create_tag(name))["id"])  # type: ignore[union-attr]
+
+    # ── Step 1: Apply metadata + content to original document ────────
+    await _paperless.update_document_metadata(  # type: ignore[union-attr]
+        document_id,
+        title=title,
+        created=created,
+        correspondent=corr_id,
+        document_type=dtype_id,
+        tags=tag_ids,
+        content=combined_text,
+    )
+    logger.info("Web UI: approved OCR + metadata for document %d", document_id)
+
+    # ── Steps 2-4: Rebuild PDF, wait, restore exact metadata ─────────
+    if build_pdf:
+        await _rebuild_and_replace_pdf(document_id, combined_text, tag_ids, ocr_data_json)
+
+    # Return JSON for async fetch, redirect for plain form posts
+    is_ajax = "x-requested-with" in request.headers or request.headers.get("accept", "").startswith("application/json")
+    if is_ajax:
+        return JSONResponse({"ok": True, "document_id": document_id})
+    return RedirectResponse(f"/ui?approved={document_id}", status_code=303)
+
+
+_TASK_POLL_INTERVAL = 2  # seconds
+_TASK_POLL_MAX = 60  # max attempts
+
+
+async def _rebuild_and_replace_pdf(
+    document_id: int,
+    combined_text: str,
+    approved_tag_ids: list[int] | None,
+    ocr_data_json: str = "",
+) -> None:
+    """Rebuild a searchable PDF and replace the original document in Paperless.
+
+    Workflow:
+      1. Re-fetch original (metadata was already patched by ocr_approve step 1).
+      2. Download original, reuse pre-computed OCR data (or re-OCR as fallback),
+         build searchable PDF.
+      3. Upload PDF without tags so Paperless ingests it cleanly.
+      4. Wait for ingestion to complete.
+      5. PATCH new doc: set content, copy title/correspondent/document_type/created
+         from original, and overwrite ALL tags with the user-approved set
+         (stripping anything Paperless auto-applied during ingestion).
+      6. Delete the original document.
+    """
+    import json
+
+    from paperless_macocr.app import _replacing_titles
+    from paperless_macocr.ocr import OcrPageData
+
+    # Step 1 — re-fetch original to get the canonical post-patch metadata
+    doc_meta = await _paperless.get_document(document_id)  # type: ignore[union-attr]
+    mime = doc_meta.get("mime_type", "")
+    if mime != "application/pdf":
+        logger.warning("Web UI: rebuild_pdf skipped — document %d is not a PDF (%s)", document_id, mime)
+        return
+
+    # If the user left tags blank, fall back to whatever is currently on the doc
+    final_tag_ids: list[int] = approved_tag_ids if approved_tag_ids is not None else doc_meta.get("tags", [])
+
+    # Step 2 — download original and build searchable PDF
+    file_bytes = await _paperless.download_document(document_id, original=True)  # type: ignore[union-attr]
+    loop = asyncio.get_running_loop()
+
+    # Try to reuse OCR results from the preview step (avoids re-rendering + re-OCRing)
+    page_results: list[OcrPageData] | None = None
+    if ocr_data_json:
+        try:
+            raw = json.loads(ocr_data_json)
+            page_results = [
+                OcrPageData(
+                    text=p["text"],
+                    boxes=p["boxes"],
+                    image_width=p["image_width"],
+                    image_height=p["image_height"],
+                )
+                for p in raw
+            ]
+            logger.info("Web UI: reusing %d pre-computed OCR pages for document %d", len(page_results), document_id)
+        except (json.JSONDecodeError, KeyError, TypeError):
+            logger.warning("Web UI: failed to parse ocr_data_json for document %d, falling back to re-OCR", document_id)
+            page_results = None
+
+    if page_results is None:
+        # Fallback: re-OCR all pages (only when pre-computed data is unavailable)
+        ocr_pngs = await loop.run_in_executor(
+            None,
+            pdf_pages_to_png,
+            file_bytes,
+            _settings.ocr_dpi,  # type: ignore[union-attr]
+        )
+
+        async def _ocr_page(page_idx: int) -> OcrPageData:
+            return await _macocr.ocr_image(  # type: ignore[union-attr]
+                ocr_pngs[page_idx],
+                filename=f"page_{page_idx + 1:04d}.png",
+            )
+
+        page_results = list(await asyncio.gather(*(_ocr_page(i) for i in range(len(ocr_pngs)))))
+
+    searchable_pdf = await loop.run_in_executor(
+        None,
+        pdf_embed_text_layer,
+        file_bytes,
+        page_results,
+    )
+    logger.info("Web UI: built searchable PDF for document %d (%d bytes)", document_id, len(searchable_pdf))
+
+    title = doc_meta.get("title") or f"doc-{document_id}"
+    _replacing_titles.add(title)
+    try:
+        # Step 3 — upload WITHOUT tags; Paperless may auto-apply its own rules
+        task_uuid = await _paperless.upload_document(  # type: ignore[union-attr]
+            searchable_pdf,
+            f"{title}.pdf",
+            title=title,
+            correspondent=doc_meta.get("correspondent"),
+            document_type=doc_meta.get("document_type"),
+            storage_path=doc_meta.get("storage_path"),
+            archive_serial_number=doc_meta.get("archive_serial_number"),
+            # tags intentionally omitted — overwritten in step 5
+        )
+
+        # Step 4 — wait for ingestion
+        new_doc_id = None
+        for _ in range(_TASK_POLL_MAX):
+            await asyncio.sleep(_TASK_POLL_INTERVAL)
+            task = await _paperless.get_task(task_uuid)  # type: ignore[union-attr]
+            status = task.get("status", "")
+            if status == "SUCCESS":
+                new_doc_id = task.get("related_document")
+                break
+            if status == "FAILURE":
+                logger.error(
+                    "Web UI: consumption failed for document %d: %s",
+                    document_id,
+                    task.get("result", "unknown error"),
+                )
+                return
+
+        if new_doc_id is None:
+            logger.error("Web UI: consumption timed out for document %d (task %s)", document_id, task_uuid)
+            return
+
+        new_doc_id = int(new_doc_id)
+
+        # Step 5 — overwrite new doc's metadata: copy from original, replace
+        # ALL tags (including anything Paperless auto-applied) with the approved set
+        await _paperless.update_document_metadata(  # type: ignore[union-attr]
+            new_doc_id,
+            title=doc_meta.get("title"),
+            created=doc_meta.get("created"),
+            correspondent=doc_meta.get("correspondent"),
+            document_type=doc_meta.get("document_type"),
+            tags=final_tag_ids,
+            content=combined_text,
+        )
+        logger.info(
+            "Web UI: set metadata on new document %d (tags=%s)",
+            new_doc_id,
+            final_tag_ids,
+        )
+
+        # Step 6 — delete the original
+        await _paperless.delete_document(document_id)  # type: ignore[union-attr]
+        logger.info("Web UI: replaced document %d with searchable PDF (new id: %d)", document_id, new_doc_id)
+    finally:
+        _replacing_titles.discard(title)
+
+
+# ─── Thumbnail proxy ────────────────────────────────────────────────
+
+
+@router.get("/ui/thumb/{document_id}")
+async def thumbnail(document_id: int):
+    _require("_paperless")
+    data = await _paperless.get_thumbnail(document_id)  # type: ignore[union-attr]
+    return Response(
+        content=data,
+        media_type="image/webp",
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
+
+
+# ─── Metadata options (autocomplete) ────────────────────────────────
+
+
+@router.get("/ui/meta-options")
+async def meta_options():
+    """Return all correspondents, document types, and tags for autocomplete."""
+    _require("_paperless")
+    correspondents, doc_types, tags = await _gather_meta_options()
+    return JSONResponse(
+        {
+            "correspondents": [{"id": c["id"], "name": c["name"]} for c in correspondents],
+            "document_types": [{"id": d["id"], "name": d["name"]} for d in doc_types],
+            "tags": [{"id": t["id"], "name": t["name"]} for t in tags],
+        }
+    )
+
+
+async def _gather_meta_options() -> tuple[list, list, list]:
+    correspondents, doc_types, tags = await asyncio.gather(
+        _paperless.list_correspondents(),  # type: ignore[union-attr]
+        _paperless.list_document_types(),  # type: ignore[union-attr]
+        _paperless.list_tags(),  # type: ignore[union-attr]
+    )
+    return correspondents, doc_types, tags
+
+
+# ─── Helpers ────────────────────────────────────────────────────────
+
+
+def _serialize_ocr_data(page_results: list[OcrPageData]) -> str:
+    """Serialize OCR results to a JSON string for form submission."""
+    import json
+
+    return json.dumps(
+        [
+            {
+                "text": r.text,
+                "boxes": r.boxes,
+                "image_width": r.image_width,
+                "image_height": r.image_height,
+            }
+            for r in page_results
+        ]
+    )

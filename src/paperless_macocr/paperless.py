@@ -112,3 +112,184 @@ class PaperlessClient:
         response = await self._client.delete(f"/api/documents/{document_id}/")
         response.raise_for_status()
         logger.info("Deleted document %d", document_id)
+
+    async def list_documents(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 25,
+        ordering: str = "-added",
+        search: str = "",
+        tags_id_all: list[int] | None = None,
+        tags_id_none: list[int] | None = None,
+    ) -> dict[str, Any]:
+        """List documents with optional filtering.
+
+        Returns the raw Paperless-NGX paginated response with
+        ``count``, ``next``, ``previous``, and ``results`` keys.
+        """
+        params: dict[str, Any] = {
+            "page": page,
+            "page_size": page_size,
+            "ordering": ordering,
+        }
+        if search:
+            params["query"] = search
+        if tags_id_all:
+            params["tags__id__all"] = ",".join(str(t) for t in tags_id_all)
+        if tags_id_none:
+            params["tags__id__none"] = ",".join(str(t) for t in tags_id_none)
+        response = await self._client.get("/api/documents/", params=params)
+        response.raise_for_status()
+        return response.json()
+
+    async def list_tags(self) -> list[dict[str, Any]]:
+        """Return all tags from Paperless-NGX."""
+        results: list[dict[str, Any]] = []
+        url = "/api/tags/?page_size=100"
+        while url:
+            response = await self._client.get(url)
+            response.raise_for_status()
+            data = response.json()
+            results.extend(data.get("results", []))
+            url = data.get("next", "")
+            if url:
+                # next is an absolute URL; strip the base to use relative
+                base = str(self._client.base_url).rstrip("/")
+                if url.startswith(base):
+                    url = url[len(base) :]
+        return results
+
+    async def get_thumbnail(self, document_id: int) -> bytes:
+        """Download the thumbnail image for a document."""
+        response = await self._client.get(f"/api/documents/{document_id}/thumb/")
+        response.raise_for_status()
+        return response.content
+
+    async def _list_all(self, path: str) -> list[dict[str, Any]]:
+        """Paginate through all pages of a resource endpoint."""
+        results: list[dict[str, Any]] = []
+        url = f"{path}?page_size=500"
+        base = str(self._client.base_url).rstrip("/")
+        while url:
+            response = await self._client.get(url)
+            response.raise_for_status()
+            data = response.json()
+            results.extend(data.get("results", []))
+            next_url: str = data.get("next") or ""
+            if next_url.startswith(base):
+                next_url = next_url[len(base) :]
+            url = next_url
+        return results
+
+    async def list_correspondents(self) -> list[dict[str, Any]]:
+        """Return all correspondents (id, name)."""
+        return await self._list_all("/api/correspondents/")
+
+    async def list_document_types(self) -> list[dict[str, Any]]:
+        """Return all document types (id, name)."""
+        return await self._list_all("/api/document_types/")
+
+    async def create_correspondent(self, name: str) -> dict[str, Any]:
+        """Create a new correspondent and return the created object."""
+        response = await self._client.post("/api/correspondents/", json={"name": name})
+        response.raise_for_status()
+        result: dict[str, Any] = response.json()
+        logger.info("Created correspondent %r (id %d)", name, result["id"])
+        return result
+
+    async def create_document_type(self, name: str) -> dict[str, Any]:
+        """Create a new document type and return the created object."""
+        response = await self._client.post("/api/document_types/", json={"name": name})
+        response.raise_for_status()
+        result: dict[str, Any] = response.json()
+        logger.info("Created document type %r (id %d)", name, result["id"])
+        return result
+
+    async def create_tag(self, name: str) -> dict[str, Any]:
+        """Create a new tag and return the created object."""
+        response = await self._client.post("/api/tags/", json={"name": name})
+        response.raise_for_status()
+        result: dict[str, Any] = response.json()
+        logger.info("Created tag %r (id %d)", name, result["id"])
+        return result
+
+    async def update_document_metadata(
+        self,
+        document_id: int,
+        *,
+        title: str | None = None,
+        created: str | None = None,
+        correspondent: int | None = None,
+        document_type: int | None = None,
+        tags: list[int] | None = None,
+        content: str | None = None,
+    ) -> dict[str, Any]:
+        """PATCH arbitrary metadata fields on a document."""
+        payload: dict[str, Any] = {}
+        if title is not None:
+            payload["title"] = title
+        if created is not None:
+            payload["created"] = created
+        if correspondent is not None:
+            payload["correspondent"] = correspondent
+        if document_type is not None:
+            payload["document_type"] = document_type
+        if tags is not None:
+            payload["tags"] = tags
+        if content is not None:
+            payload["content"] = content
+        if not payload:
+            return {}
+        response = await self._client.patch(
+            f"/api/documents/{document_id}/",
+            json=payload,
+        )
+        response.raise_for_status()
+        result: dict[str, Any] = response.json()
+        logger.info("Updated metadata for document %d: %s", document_id, list(payload))
+        return result
+
+    async def remove_tags_from_document(
+        self,
+        document_id: int,
+        remove_entries: list[str],
+    ) -> None:
+        """Remove specific tags from a document.
+
+        *remove_entries* is a list of tag names or numeric ID strings
+        (as returned by ``Settings.get_replace_pdf_remove_tags()``).
+        Tags not present on the document are silently ignored.
+        """
+        if not remove_entries:
+            return
+
+        # Resolve entries to IDs
+        all_tags = await self.list_tags()
+        name_to_id = {t["name"]: t["id"] for t in all_tags}
+        remove_ids: set[int] = set()
+        for entry in remove_entries:
+            if entry.isdigit():
+                remove_ids.add(int(entry))
+            elif entry in name_to_id:
+                remove_ids.add(name_to_id[entry])
+            else:
+                logger.warning("remove_tags_from_document: tag %r not found, skipping", entry)
+
+        if not remove_ids:
+            return
+
+        doc = await self.get_document(document_id)
+        current_tags: list[int] = doc.get("tags", [])
+        new_tags = [t for t in current_tags if t not in remove_ids]
+
+        if new_tags == current_tags:
+            return  # nothing to change
+
+        response = await self._client.patch(
+            f"/api/documents/{document_id}/",
+            json={"tags": new_tags},
+        )
+        response.raise_for_status()
+        removed = [t for t in current_tags if t in remove_ids]
+        logger.info("Removed tags %s from document %d", removed, document_id)

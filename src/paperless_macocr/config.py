@@ -34,6 +34,46 @@ class Settings(BaseSettings):
     skip_if_text_present: bool = True
     replace_pdf: bool = False
 
+    # Web UI
+    web_ui_enabled: bool = True
+
+    # Web UI authentication
+    # "none" = no auth, "basic" = HTTP basic, "oidc" = OpenID Connect
+    web_ui_auth: str = "none"
+
+    # Basic auth credentials (when web_ui_auth = "basic")
+    web_ui_username: str = "admin"
+    web_ui_password: str = ""
+
+    # OIDC / OAuth2 (when web_ui_auth = "oidc")
+    oidc_client_id: str = ""
+    oidc_client_secret: str = ""
+    oidc_discovery_url: str = ""
+    oidc_redirect_uri: str = ""
+
+    # Session secret for cookie signing
+    session_secret: str = "change-me-in-production"  # noqa: S105
+
+    # Tag IDs to exclude from the web UI document list (comma-separated)
+    web_ui_exclude_tags: str = ""
+
+    # Tag names or IDs to remove from a document after its searchable PDF is
+    # uploaded (e.g. "Inbox" or "1,2").  Applies to both the automatic
+    # REPLACE_PDF pipeline and the Web UI "rebuild PDF" checkbox.
+    replace_pdf_remove_tags: str = "Neu"
+
+    def get_exclude_tag_ids(self) -> list[int]:
+        """Parse the comma-separated exclude tag IDs into a list."""
+        if not self.web_ui_exclude_tags:
+            return []
+        return [int(t.strip()) for t in self.web_ui_exclude_tags.split(",") if t.strip().isdigit()]
+
+    def get_replace_pdf_remove_tags(self) -> list[str]:
+        """Return raw entries (names or numeric IDs) to remove after PDF replace."""
+        if not self.replace_pdf_remove_tags:
+            return []
+        return [t.strip() for t in self.replace_pdf_remove_tags.split(",") if t.strip()]
+
 
 def get_settings() -> Settings:
     """Create and return application settings."""

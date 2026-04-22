@@ -54,6 +54,33 @@ def pdf_page_to_png(pdf_bytes: bytes, page_number: int, dpi: int = 300) -> bytes
         return pixmap.tobytes(output="png")
 
 
+def pdf_pages_to_png(
+    pdf_bytes: bytes,
+    dpi: int = 300,
+    *,
+    pages: list[int] | None = None,
+) -> list[bytes]:
+    """Render multiple PDF pages to PNG images, opening the PDF only once.
+
+    Args:
+        pdf_bytes: Raw PDF file content.
+        dpi: Resolution for rendering.
+        pages: Zero-based page indices to render. ``None`` = all pages.
+
+    Returns:
+        List of PNG image bytes in page order.
+    """
+    zoom = dpi / 72.0
+    matrix = pymupdf.Matrix(zoom, zoom)
+    result: list[bytes] = []
+    with pymupdf.open(stream=pdf_bytes, filetype="pdf") as doc:
+        indices = pages if pages is not None else range(len(doc))
+        for idx in indices:
+            pixmap = doc[idx].get_pixmap(matrix=matrix)
+            result.append(pixmap.tobytes(output="png"))
+    return result
+
+
 def _page_tilt_deg(boxes: list[dict[str, Any]]) -> float:
     """Estimate the median text rotation angle across all boxes on a page.
 
