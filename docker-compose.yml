@@ -16,6 +16,25 @@ services:
       LOG_LEVEL: "INFO"
       OCR_DPI: "300"
       SKIP_IF_TEXT_PRESENT: "true"
+      REPLACE_PDF: "false"
+      # Comma-separated tag names or IDs to strip from the replacement document
+      REPLACE_PDF_REMOVE_TAGS: ""
+      # ── Web UI ────────────────────────────────────────────────────
+      WEB_UI_ENABLED: "true"
+      # Auth mode: none | basic | oidc
+      WEB_UI_AUTH: "none"
+      # Basic auth (when WEB_UI_AUTH=basic)
+      WEB_UI_USERNAME: "admin"
+      WEB_UI_PASSWORD: ""
+      # Session signing secret — change this in production
+      SESSION_SECRET: "${SESSION_SECRET:-change-me-in-production}"
+      # Comma-separated tag IDs to hide from the document list
+      WEB_UI_EXCLUDE_TAGS: ""
+      # ── OIDC (when WEB_UI_AUTH=oidc) ──────────────────────────────
+      OIDC_CLIENT_ID: ""
+      OIDC_CLIENT_SECRET: ""
+      OIDC_DISCOVERY_URL: ""
+      OIDC_REDIRECT_URI: ""
     # If Paperless-NGX is running in Docker on the same network:
     # networks:
     #   - paperless
