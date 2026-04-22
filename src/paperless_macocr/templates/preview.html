@@ -227,6 +227,9 @@
       </div>
     </div>
 
+    <!-- Pre-computed OCR data (reused during PDF rebuild to avoid re-OCR) -->
+    <input type="hidden" name="ocr_data_json" value="{{ ocr_data_json | e }}">
+
     <!-- OCR text -->
     <label for="f-text" style="font-size:0.8rem; color:var(--muted);">
       Combined OCR text (<span id="char-count">{{ combined_text|length }}</span> chars)

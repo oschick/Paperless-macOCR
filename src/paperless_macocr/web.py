@@ -20,8 +20,7 @@ from paperless_macocr.auth import (
 )
 from paperless_macocr.pdf import (
     pdf_embed_text_layer,
-    pdf_page_count,
-    pdf_page_to_png,
+    pdf_pages_to_png,
 )
 
 if TYPE_CHECKING:
@@ -229,31 +228,19 @@ async def ocr_preview(
     page_previews: list[str] = []
 
     if is_pdf:
-        num_pages = pdf_page_count(file_bytes)
+        # Batch-render all pages at both DPIs in two passes (opens the PDF only twice instead of 2*N times)
+        ocr_pngs, preview_pngs = await asyncio.gather(
+            loop.run_in_executor(None, pdf_pages_to_png, file_bytes, _settings.ocr_dpi),  # type: ignore[union-attr]
+            loop.run_in_executor(None, pdf_pages_to_png, file_bytes, 100),
+        )
+        num_pages = len(ocr_pngs)
 
         async def _ocr_page(page_idx: int) -> tuple[OcrPageData, str]:
-            # Render once at OCR DPI (CPU-bound → thread pool)
-            ocr_png = await loop.run_in_executor(
-                None,
-                pdf_page_to_png,
-                file_bytes,
-                page_idx,
-                _settings.ocr_dpi,  # type: ignore[union-attr]
-            )
-            # Render low-res preview in parallel with OCR
-            preview_task = loop.run_in_executor(
-                None,
-                pdf_page_to_png,
-                file_bytes,
-                page_idx,
-                100,
-            )
             ocr_result = await _macocr.ocr_image(  # type: ignore[union-attr]
-                ocr_png,
+                ocr_pngs[page_idx],
                 filename=f"page_{page_idx + 1:04d}.png",
             )
-            preview_png = await preview_task
-            return ocr_result, base64.b64encode(preview_png).decode()
+            return ocr_result, base64.b64encode(preview_pngs[page_idx]).decode()
 
         results = await asyncio.gather(*(_ocr_page(i) for i in range(num_pages)))
         for ocr_result, preview_b64 in results:
@@ -309,6 +296,7 @@ async def ocr_approve(request: Request, document_id: int):
     form = await request.form()
     combined_text = str(form.get("combined_text", ""))
     build_pdf = form.get("replace_pdf") == "on"
+    ocr_data_json = str(form.get("ocr_data_json", ""))
 
     if not combined_text.strip():
         raise HTTPException(status_code=422, detail="No text to approve")
@@ -357,7 +345,7 @@ async def ocr_approve(request: Request, document_id: int):
 
     # ── Steps 2-4: Rebuild PDF, wait, restore exact metadata ─────────
     if build_pdf:
-        await _rebuild_and_replace_pdf(document_id, combined_text, tag_ids)
+        await _rebuild_and_replace_pdf(document_id, combined_text, tag_ids, ocr_data_json)
 
     # Return JSON for async fetch, redirect for plain form posts
     is_ajax = "x-requested-with" in request.headers or request.headers.get("accept", "").startswith("application/json")
@@ -374,12 +362,14 @@ async def _rebuild_and_replace_pdf(
     document_id: int,
     combined_text: str,
     approved_tag_ids: list[int] | None,
+    ocr_data_json: str = "",
 ) -> None:
     """Rebuild a searchable PDF and replace the original document in Paperless.
 
     Workflow:
       1. Re-fetch original (metadata was already patched by ocr_approve step 1).
-      2. Download original, re-OCR all pages, build searchable PDF.
+      2. Download original, reuse pre-computed OCR data (or re-OCR as fallback),
+         build searchable PDF.
       3. Upload PDF without tags so Paperless ingests it cleanly.
       4. Wait for ingestion to complete.
       5. PATCH new doc: set content, copy title/correspondent/document_type/created
@@ -387,7 +377,10 @@ async def _rebuild_and_replace_pdf(
          (stripping anything Paperless auto-applied during ingestion).
       6. Delete the original document.
     """
+    import json
+
     from paperless_macocr.app import _replacing_titles
+    from paperless_macocr.ocr import OcrPageData
 
     # Step 1 — re-fetch original to get the canonical post-patch metadata
     doc_meta = await _paperless.get_document(document_id)  # type: ignore[union-attr]
@@ -399,25 +392,45 @@ async def _rebuild_and_replace_pdf(
     # If the user left tags blank, fall back to whatever is currently on the doc
     final_tag_ids: list[int] = approved_tag_ids if approved_tag_ids is not None else doc_meta.get("tags", [])
 
-    # Step 2 — re-OCR and build searchable PDF (pages concurrently)
+    # Step 2 — download original and build searchable PDF
     file_bytes = await _paperless.download_document(document_id, original=True)  # type: ignore[union-attr]
-    num_pages = pdf_page_count(file_bytes)
     loop = asyncio.get_running_loop()
 
-    async def _ocr_page(page_idx: int) -> OcrPageData:
-        png_bytes = await loop.run_in_executor(
+    # Try to reuse OCR results from the preview step (avoids re-rendering + re-OCRing)
+    page_results: list[OcrPageData] | None = None
+    if ocr_data_json:
+        try:
+            raw = json.loads(ocr_data_json)
+            page_results = [
+                OcrPageData(
+                    text=p["text"],
+                    boxes=p["boxes"],
+                    image_width=p["image_width"],
+                    image_height=p["image_height"],
+                )
+                for p in raw
+            ]
+            logger.info("Web UI: reusing %d pre-computed OCR pages for document %d", len(page_results), document_id)
+        except (json.JSONDecodeError, KeyError, TypeError):
+            logger.warning("Web UI: failed to parse ocr_data_json for document %d, falling back to re-OCR", document_id)
+            page_results = None
+
+    if page_results is None:
+        # Fallback: re-OCR all pages (only when pre-computed data is unavailable)
+        ocr_pngs = await loop.run_in_executor(
             None,
-            pdf_page_to_png,
+            pdf_pages_to_png,
             file_bytes,
-            page_idx,
             _settings.ocr_dpi,  # type: ignore[union-attr]
         )
-        return await _macocr.ocr_image(  # type: ignore[union-attr]
-            png_bytes,
-            filename=f"page_{page_idx + 1:04d}.png",
-        )
 
-    page_results: list[OcrPageData] = list(await asyncio.gather(*(_ocr_page(i) for i in range(num_pages))))
+        async def _ocr_page(page_idx: int) -> OcrPageData:
+            return await _macocr.ocr_image(  # type: ignore[union-attr]
+                ocr_pngs[page_idx],
+                filename=f"page_{page_idx + 1:04d}.png",
+            )
+
+        page_results = list(await asyncio.gather(*(_ocr_page(i) for i in range(len(ocr_pngs)))))
 
     searchable_pdf = await loop.run_in_executor(
         None,
