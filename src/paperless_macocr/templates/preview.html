@@ -227,9 +227,6 @@
       </div>
     </div>
 
-    <!-- Pre-computed OCR data (reused during PDF rebuild to avoid re-OCR) -->
-    <input type="hidden" name="ocr_data_json" value="{{ ocr_data_json | e }}">
-
     <!-- OCR text -->
     <label for="f-text" style="font-size:0.8rem; color:var(--muted);">
       Combined OCR text (<span id="char-count">{{ combined_text|length }}</span> chars)
@@ -324,6 +321,11 @@ _approveForm.addEventListener('submit', async (e) => {
 
   try {
     const formData = new FormData(_approveForm);
+    // Inject raw OCR data from the <script> tag (avoids HTML-attribute encoding issues)
+    const ocrEl = document.getElementById('ocr-data-json');
+    if (ocrEl && ocrEl.textContent.trim()) {
+      formData.set('ocr_data_json', ocrEl.textContent.trim());
+    }
     const resp = await fetch(_approveForm.action, {
       method: 'POST',
       headers: { 'Accept': 'application/json' },

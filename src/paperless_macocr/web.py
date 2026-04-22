@@ -296,7 +296,14 @@ async def ocr_approve(request: Request, document_id: int):
     form = await request.form()
     combined_text = str(form.get("combined_text", ""))
     build_pdf = form.get("replace_pdf") == "on"
-    ocr_data_json = str(form.get("ocr_data_json", ""))
+    ocr_data_raw = form.get("ocr_data_json", "")
+    ocr_data_json = str(ocr_data_raw) if ocr_data_raw else ""
+    logger.debug(
+        "Web UI approve %d: ocr_data_json type=%s len=%d",
+        document_id,
+        type(ocr_data_raw).__name__,
+        len(ocr_data_json),
+    )
 
     if not combined_text.strip():
         raise HTTPException(status_code=422, detail="No text to approve")
