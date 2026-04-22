@@ -222,21 +222,34 @@ async def ocr_preview(
     mime_type = doc_meta.get("mime_type", "")
     is_pdf = mime_type == "application/pdf"
 
-    # OCR all pages
+    loop = asyncio.get_running_loop()
+
+    # OCR all pages concurrently
     page_results: list[OcrPageData] = []
     page_previews: list[str] = []
 
     if is_pdf:
         num_pages = pdf_page_count(file_bytes)
-        for page_idx in range(num_pages):
-            png_bytes = pdf_page_to_png(file_bytes, page_idx, dpi=_settings.ocr_dpi)  # type: ignore[union-attr]
-            result = await _macocr.ocr_image(  # type: ignore[union-attr]
-                png_bytes, filename=f"page_{page_idx + 1:04d}.png"
+
+        async def _ocr_page(page_idx: int) -> tuple[OcrPageData, str]:
+            # Render once at OCR DPI (CPU-bound → thread pool)
+            ocr_png = await loop.run_in_executor(
+                None, pdf_page_to_png, file_bytes, page_idx, _settings.ocr_dpi,  # type: ignore[union-attr]
             )
-            page_results.append(result)
-            # Low-res preview
-            preview_png = pdf_page_to_png(file_bytes, page_idx, dpi=100)
-            page_previews.append(base64.b64encode(preview_png).decode())
+            # Render low-res preview in parallel with OCR
+            preview_task = loop.run_in_executor(
+                None, pdf_page_to_png, file_bytes, page_idx, 100,
+            )
+            ocr_result = await _macocr.ocr_image(  # type: ignore[union-attr]
+                ocr_png, filename=f"page_{page_idx + 1:04d}.png",
+            )
+            preview_png = await preview_task
+            return ocr_result, base64.b64encode(preview_png).decode()
+
+        results = await asyncio.gather(*(_ocr_page(i) for i in range(num_pages)))
+        for ocr_result, preview_b64 in results:
+            page_results.append(ocr_result)
+            page_previews.append(preview_b64)
     else:
         result = await _macocr.ocr_image(file_bytes, filename="document.png")  # type: ignore[union-attr]
         page_results.append(result)
@@ -245,8 +258,9 @@ async def ocr_preview(
     combined_text = "\n\n".join(r.text.strip() for r in page_results if r.text.strip())
     existing_text = doc_meta.get("content", "").strip()
     has_existing = bool(existing_text)
-    tag_map = await _get_tag_map()
-    correspondents, doc_types, all_tags = await _gather_meta_options()
+    tag_map, (correspondents, doc_types, all_tags) = await asyncio.gather(
+        _get_tag_map(), _gather_meta_options(),
+    )
 
     return templates.TemplateResponse(
         request,
@@ -375,18 +389,26 @@ async def _rebuild_and_replace_pdf(
     # If the user left tags blank, fall back to whatever is currently on the doc
     final_tag_ids: list[int] = approved_tag_ids if approved_tag_ids is not None else doc_meta.get("tags", [])
 
-    # Step 2 — re-OCR and build searchable PDF
+    # Step 2 — re-OCR and build searchable PDF (pages concurrently)
     file_bytes = await _paperless.download_document(document_id, original=True)  # type: ignore[union-attr]
     num_pages = pdf_page_count(file_bytes)
-    page_results: list[OcrPageData] = []
-    for page_idx in range(num_pages):
-        png_bytes = pdf_page_to_png(file_bytes, page_idx, dpi=_settings.ocr_dpi)  # type: ignore[union-attr]
-        result = await _macocr.ocr_image(  # type: ignore[union-attr]
-            png_bytes, filename=f"page_{page_idx + 1:04d}.png"
-        )
-        page_results.append(result)
+    loop = asyncio.get_running_loop()
 
-    searchable_pdf = pdf_embed_text_layer(file_bytes, page_results)
+    async def _ocr_page(page_idx: int) -> OcrPageData:
+        png_bytes = await loop.run_in_executor(
+            None, pdf_page_to_png, file_bytes, page_idx, _settings.ocr_dpi,  # type: ignore[union-attr]
+        )
+        return await _macocr.ocr_image(  # type: ignore[union-attr]
+            png_bytes, filename=f"page_{page_idx + 1:04d}.png",
+        )
+
+    page_results: list[OcrPageData] = list(
+        await asyncio.gather(*(_ocr_page(i) for i in range(num_pages)))
+    )
+
+    searchable_pdf = await loop.run_in_executor(
+        None, pdf_embed_text_layer, file_bytes, page_results,
+    )
     logger.info("Web UI: built searchable PDF for document %d (%d bytes)", document_id, len(searchable_pdf))
 
     title = doc_meta.get("title") or f"doc-{document_id}"
@@ -458,7 +480,11 @@ async def _rebuild_and_replace_pdf(
 async def thumbnail(document_id: int):
     _require("_paperless")
     data = await _paperless.get_thumbnail(document_id)  # type: ignore[union-attr]
-    return Response(content=data, media_type="image/webp")
+    return Response(
+        content=data,
+        media_type="image/webp",
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
 
 
 # ─── Metadata options (autocomplete) ────────────────────────────────
@@ -479,9 +505,11 @@ async def meta_options():
 
 
 async def _gather_meta_options() -> tuple[list, list, list]:
-    correspondents = await _paperless.list_correspondents()  # type: ignore[union-attr]
-    doc_types = await _paperless.list_document_types()  # type: ignore[union-attr]
-    tags = await _paperless.list_tags()  # type: ignore[union-attr]
+    correspondents, doc_types, tags = await asyncio.gather(
+        _paperless.list_correspondents(),  # type: ignore[union-attr]
+        _paperless.list_document_types(),  # type: ignore[union-attr]
+        _paperless.list_tags(),  # type: ignore[union-attr]
+    )
     return correspondents, doc_types, tags
 
 
