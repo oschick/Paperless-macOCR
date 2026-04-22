@@ -234,14 +234,23 @@ async def ocr_preview(
         async def _ocr_page(page_idx: int) -> tuple[OcrPageData, str]:
             # Render once at OCR DPI (CPU-bound → thread pool)
             ocr_png = await loop.run_in_executor(
-                None, pdf_page_to_png, file_bytes, page_idx, _settings.ocr_dpi,  # type: ignore[union-attr]
+                None,
+                pdf_page_to_png,
+                file_bytes,
+                page_idx,
+                _settings.ocr_dpi,  # type: ignore[union-attr]
             )
             # Render low-res preview in parallel with OCR
             preview_task = loop.run_in_executor(
-                None, pdf_page_to_png, file_bytes, page_idx, 100,
+                None,
+                pdf_page_to_png,
+                file_bytes,
+                page_idx,
+                100,
             )
             ocr_result = await _macocr.ocr_image(  # type: ignore[union-attr]
-                ocr_png, filename=f"page_{page_idx + 1:04d}.png",
+                ocr_png,
+                filename=f"page_{page_idx + 1:04d}.png",
             )
             preview_png = await preview_task
             return ocr_result, base64.b64encode(preview_png).decode()
@@ -259,7 +268,8 @@ async def ocr_preview(
     existing_text = doc_meta.get("content", "").strip()
     has_existing = bool(existing_text)
     tag_map, (correspondents, doc_types, all_tags) = await asyncio.gather(
-        _get_tag_map(), _gather_meta_options(),
+        _get_tag_map(),
+        _gather_meta_options(),
     )
 
     return templates.TemplateResponse(
@@ -396,18 +406,24 @@ async def _rebuild_and_replace_pdf(
 
     async def _ocr_page(page_idx: int) -> OcrPageData:
         png_bytes = await loop.run_in_executor(
-            None, pdf_page_to_png, file_bytes, page_idx, _settings.ocr_dpi,  # type: ignore[union-attr]
+            None,
+            pdf_page_to_png,
+            file_bytes,
+            page_idx,
+            _settings.ocr_dpi,  # type: ignore[union-attr]
         )
         return await _macocr.ocr_image(  # type: ignore[union-attr]
-            png_bytes, filename=f"page_{page_idx + 1:04d}.png",
+            png_bytes,
+            filename=f"page_{page_idx + 1:04d}.png",
         )
 
-    page_results: list[OcrPageData] = list(
-        await asyncio.gather(*(_ocr_page(i) for i in range(num_pages)))
-    )
+    page_results: list[OcrPageData] = list(await asyncio.gather(*(_ocr_page(i) for i in range(num_pages))))
 
     searchable_pdf = await loop.run_in_executor(
-        None, pdf_embed_text_layer, file_bytes, page_results,
+        None,
+        pdf_embed_text_layer,
+        file_bytes,
+        page_results,
     )
     logger.info("Web UI: built searchable PDF for document %d (%d bytes)", document_id, len(searchable_pdf))
 
