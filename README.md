@@ -201,14 +201,47 @@ The service includes a built-in web interface for browsing your Paperless-NGX do
 
 ### Features
 
-- **Document browser** — paginated list with hover-zoom thumbnails, tag badges, search, and a text-status indicator (has text / no text)
-- **OCR preview** — run OCR on any document and see the recognised text side-by-side with the page image; switch between page-by-page, full-text, and compare (new vs existing) tabs
-- **Bounding-box overlay** — "Show Boxes" button draws every OCR text box on the page image as a semi-transparent polygon; hovering shows the recognised text for that box
-- **Metadata editing** — edit Title, Date created, Correspondent, Document type, and Tags directly on the preview page; autocomplete suggests existing Paperless values; entering a name that doesn't exist **creates it automatically**
-- **Approve / reject workflow** — only writes to Paperless after explicit approval; includes an optional **"Rebuild searchable PDF"** checkbox that re-runs OCR, builds a new PDF with an embedded invisible text layer, uploads it to Paperless (preserving all metadata), and deletes the original
-- **Tag filtering** — hide sensitive documents by excluding specific tag IDs
-- **Authentication** — none, HTTP basic auth, or OpenID Connect (Authentik, Keycloak, etc.)
-- **Responsive dark / light mode** — adapts to system preference
+#### Document Browser
+
+- **Paginated list** with search and a tag filter dropdown (auto-submits on change)
+- **Thumbnails** with lazy loading and hover-zoom on desktop
+- **Status dots** — green when the document already has text content, yellow when empty
+- **Tag badges**, correspondent, and "added" date on every row
+- **Open in Paperless** button (`↗`) to jump to the document's detail page
+- **Excluded tags notice** — when `WEB_UI_EXCLUDE_TAGS` is set, a notice shows which tags are hidden
+- **Smart pagination** with ellipsis (first 3 pages, current ± 2, last 3)
+
+#### OCR Preview
+
+- **Side-by-side view** — page image on the left, editable OCR text on the right (per page)
+- **Three tabs**: Page-by-Page (default), Full Text (combined read-only), and Compare (existing vs. new — only shown when the document already has content)
+- **Bounding-box overlay** — toggle "Show Boxes" to draw every OCR text region on the page image; hover a box to see its recognised text in a tooltip
+- **Per-page text editing** — edit OCR text in each page's textarea; changes automatically sync to the combined text with a live character count
+- **Previous / Next navigation** — step through documents without returning to the list (persisted via `localStorage`)
+- **Auto-advance** — toggle to automatically navigate to the next document after approval (setting persisted in `localStorage`)
+- **Existing content warning** — shown when the document already has text, noting it will be replaced
+
+#### Metadata Editing
+
+All metadata fields are inline on the preview page — no need to switch to Paperless:
+
+- **Title** and **Date created** (date picker)
+- **Correspondent** and **Document type** — autocomplete from existing Paperless values; entering a new name **creates the entity automatically** on approval
+- **Tag chips** — type to add (with `<datalist>` autocomplete), click `×` to remove, duplicates prevented; supports Enter, comma, or datalist selection to confirm
+
+#### Approval Flow
+
+- **"Approve & Apply"** button — async POST via `fetch` with a processing spinner and toast notifications (green on success, red on failure)
+- **Keyboard shortcut** — `Ctrl+Enter` (or `⌘ Enter` on macOS) submits instantly
+- **"Also rebuild searchable PDF"** checkbox (checked by default for PDFs) — builds a new PDF with an invisible text layer from the OCR bounding boxes, uploads it to Paperless preserving all metadata, and deletes the original
+- **OCR data reuse** — when rebuilding the PDF, the service reuses the OCR results from the preview step instead of re-running OCR, cutting rebuild time significantly
+
+#### Look & Feel
+
+- **Dark / light mode** — adapts automatically to the system `prefers-color-scheme` setting
+- **Fully responsive** — mobile-optimised layout with stacked columns, larger tap targets, and a scrollable tab bar below 600 px
+- **Sticky nav bar** with username display and logout (when auth is enabled)
+- **Toast notifications** — bottom-right popups for success, error, and info messages with auto-dismiss
 
 ### Enabling the Web UI
 
@@ -291,12 +324,15 @@ SESSION_SECRET=a-random-secret-string
 
 When the **"Also rebuild searchable PDF"** checkbox is ticked on the approve page, the service:
 
-1. Re-OCRs each page of the original document at the configured DPI
-2. Builds a new PDF with an invisible text layer positioned using macOCR's bounding boxes
-3. Uploads the searchable PDF to Paperless-NGX (copying all metadata from the original)
-4. Waits for Paperless to finish consuming the new document
-5. Strips any tags listed in `REPLACE_PDF_REMOVE_TAGS` (e.g. `Inbox`) from the new document — signalling it has been fully reviewed
-6. Deletes the original document
+1. Downloads the original PDF from Paperless
+2. Reuses the OCR results from the preview step (no re-rendering or re-OCR needed)
+3. Builds a new PDF with an invisible text layer positioned using macOCR's bounding boxes
+4. Uploads the searchable PDF to Paperless-NGX (copying all metadata from the original)
+5. Waits for Paperless to finish consuming the new document
+6. Strips any tags listed in `REPLACE_PDF_REMOVE_TAGS` (e.g. `Inbox`) from the new document — signalling it has been fully reviewed
+7. Deletes the original document
+
+> If the pre-computed OCR data is unavailable for any reason, the service falls back to re-OCR automatically.
 
 > **Note:** Tag removal only happens via the Web UI approve flow, not the automatic `REPLACE_PDF=true` webhook pipeline. This lets you use the presence of the inbox tag as a "not yet manually reviewed" indicator.
 
