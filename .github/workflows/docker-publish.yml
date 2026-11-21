@@ -13,6 +13,12 @@ on:
         required: true
         type: string
 
+concurrency:
+  # PR runs replace older runs of that PR; main builds queue, and the newest waiting build
+  # replaces older waiting ones, so a burst of merges builds and releases once.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
