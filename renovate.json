@@ -7,5 +7,14 @@
     "group:allNonMajor"
   ],
   "minimumReleaseAge": "3 days",
-  "minimumReleaseAgeBehaviour": "timestamp-optional"
+  "minimumReleaseAgeBehaviour": "timestamp-optional",
+  "packageRules": [
+    {
+      "description": "The Python version is its own PR, outside every group: a new Python needs its own check",
+      "matchDepNames": [
+        "python"
+      ],
+      "groupName": "python version"
+    }
+  ]
 }
