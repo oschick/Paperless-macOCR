@@ -3,10 +3,14 @@ FROM python:3.13-slim AS builder
 
 WORKDIR /build
 
-COPY pyproject.toml README.md ./
+COPY pyproject.toml uv.lock README.md ./
 COPY src/ src/
 
-RUN pip install --no-cache-dir --prefix=/install .
+# Dependencies come from uv.lock (hash-checked); uv only exports it in this build stage.
+RUN pip install --no-cache-dir uv==0.13.10 && \
+    uv export --frozen --no-dev --no-emit-project -o /tmp/requirements.txt && \
+    pip install --no-cache-dir --require-hashes --prefix=/install -r /tmp/requirements.txt && \
+    pip install --no-cache-dir --no-deps --prefix=/install .
 
 # ---------- runtime stage ----------
 FROM python:3.13-slim
