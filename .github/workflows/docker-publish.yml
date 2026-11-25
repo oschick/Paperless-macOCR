@@ -2,7 +2,7 @@ name: Build & Publish Docker Image
 
 on:
   schedule:
-    - cron: '47 4 * * 1'
+    - cron: '47 4 * * 0'
   push:
     branches: [main]
     tags: ["v*"]
@@ -103,7 +103,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
 
       - name: Release
-        if: (github.event_name == 'push' || github.event_name == 'schedule') && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         # Renovate reads these notes into the image update PR in homelab-infra.
         run: gh release create "${{ steps.version.outputs.version }}" --target "${{ github.sha }}" --generate-notes
         env:
